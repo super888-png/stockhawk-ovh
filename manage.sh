@@ -13,7 +13,8 @@ running() { [ -n "$(dc ps -q --status running "$SERVICE" 2>/dev/null)" ]; }
 # messages: English by default; Chinese with OVH_SNIPER_LANG=zh (or DEFAULT_LANG=zh in .env)
 _lang() { local l="${OVH_SNIPER_LANG:-}"; [ -n "$l" ] || l=$(sed -n 's/^DEFAULT_LANG=//p' "${DIR:-.}/.env" 2>/dev/null | tail -n1); printf '%s' "${l:-en}"; }
 t() { if [ "$(_lang)" = zh ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
-tty_flag() { if [ -t 0 ] && [ -t 1 ]; then echo ""; else echo "-T"; fi; }
+# Decide once at startup: inside $(...) stdout is a pipe, so testing -t 1 there always failed and forced -T
+if [ -t 0 ] && [ -t 1 ]; then TTY_OPT=""; else TTY_OPT="-T"; fi
 
 backup() {
   local ts out tmpdb
@@ -78,7 +79,7 @@ case "$cmd" in
   create-admin|reset-password|list-users)
     running || die "$(t "The app is not running; run first: ovh-sniper start" "应用没有运行，先执行：ovh-sniper start")"
     # shellcheck disable=SC2046
-    dc exec $(tty_flag) "$SERVICE" python -m app.cli "$cmd" "$@" ;;
+    dc exec $TTY_OPT "$SERVICE" python -m app.cli "$cmd" "$@" ;;
   uninstall) exec "$DIR/uninstall.sh" "$@" ;;
   *) if [ "$(_lang)" = zh ]; then cat <<'USAGE'
 用法：ovh-sniper <命令>

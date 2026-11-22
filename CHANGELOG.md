@@ -1,5 +1,8 @@
 # Changelog · 更新记录
 
+## v2.0.1
+- Fix: `ovh-sniper reset-password` / `create-admin` failed with "an interactive terminal is required" because the TTY check ran inside a subshell. / 修复 `ovh-sniper reset-password`、`create-admin` 报“需要交互式终端”的问题。
+
 ## v2.0 · StockHawk for OVH
 - **Renamed to StockHawk for OVH** (repository `stockhawk-ovh`), new logo (hawk head with radar eye) and favicon set in `docs/brand/` and `app/static/brand/`. Unofficial-project notice in the panel footer, login page and READMEs. CLI command, install directory, container and env names are unchanged, so `ovh-sniper update` upgrades in place.
 - **New-task picker = Live stock table.** Same filters, search, catalog filter, in-stock toggle, stock badges, readable names, config and price. Tick rows to batch-select several machines (model + config + datacenter); rows of the same config merge into one item with several datacenters; "whole model" adds an any-config / any-datacenter item. A *Selected* tray shows the priority numbers, reorders by drag or ↑/↓, and edits each item's RAM / disk / bandwidth (or "any") and datacenter order. Deep links from Live stock (`plan,type,dc,memory,storage,endpoint`, or repeated `item=plan|type|memory|storage|dc1+dc2`) pre-fill the task. Tasks store per-item datacenters (`plan_items`); older tasks load unchanged.
