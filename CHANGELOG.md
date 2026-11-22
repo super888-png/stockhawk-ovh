@@ -1,5 +1,9 @@
 # Changelog · 更新记录
 
+## v2.1.0
+- **Prettier installer output.** `install.sh` shows a StockHawk banner with the version, numbered steps `[1/9]…[9/9]` with spinners and ✔ / ✖ / ! status, and a summary box (panel URL, directory, log, commands, HTTPS tip, GitHub and www.7919.net). Noisy apt / Docker / git / build output goes to `/opt/ovh-sniper/install.log` (mode 600); on failure the last 15 lines and the log path are printed. Re-running on an existing install shows "updating" and keeps `.env` / `data/`. Plain text, no colours or spinners when the output is not a terminal, `NO_COLOR` is set or `TERM=dumb`; prompts still read from `/dev/tty` under `curl | sudo bash`. All env vars and behaviour unchanged.
+- **安装脚本输出美化**：横幅 + 版本号、带进度动画的步骤 `[1/9]`、✔ / ✖ / ! 状态和最后的汇总框；apt / Docker / 构建等详细输出写入 `/opt/ovh-sniper/install.log`，失败时打印最后几行和日志路径；非终端、`NO_COLOR` 或 `TERM=dumb` 时自动改为纯文本。环境变量和行为不变。
+
 ## v2.0.1
 - Fix: `ovh-sniper reset-password` / `create-admin` failed with "an interactive terminal is required" because the TTY check ran inside a subshell. / 修复 `ovh-sniper reset-password`、`create-admin` 报“需要交互式终端”的问题。
 

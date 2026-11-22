@@ -4,6 +4,8 @@
 #   curl -fsSL https://www.7919.net/install.sh | sudo bash
 #   (mirror: curl -fsSL https://raw.githubusercontent.com/super888-png/stockhawk-ovh/main/install.sh | sudo bash)
 #
+# 输出：彩色步骤 [n/9] + 进度动画；docker / apt / git 的详细输出写入 /opt/ovh-sniper/install.log（失败时打印最后几行）。
+#   非终端、NO_COLOR 或 TERM=dumb 时自动改为无颜色纯文本。/ Colour steps + spinners on a terminal, full output in install.log.
 # 可以重复运行（幂等）：已有的 .env（含 SECRET_KEY）和 data/ 永远不会被覆盖，已有账号不会重建。
 #
 # 可选环境变量（用于无人值守安装）：
@@ -35,11 +37,73 @@ fi
 DIR="${OVH_SNIPER_DIR:-${SRC_DIR:-/opt/ovh-sniper}}"
 SERVICE="ovh-sniper"
 
-if [ -t 1 ]; then C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_B=$'\033[1m'; C_0=$'\033[0m'
-else C_G=""; C_Y=""; C_R=""; C_B=""; C_0=""; fi
-info() { printf '%s==>%s %s\n' "$C_G" "$C_0" "$*"; }
-warn() { printf '%s[!]%s %s\n' "$C_Y" "$C_0" "$*" >&2; }
-die()  { printf '%s[x]%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+INSTALLER_VERSION="2.1.0"
+# ---- output: colours only on a real terminal (not with NO_COLOR, TERM=dumb or when piped to a file) ----
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+  FANCY=1; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_B=$'\033[1m'; C_D=$'\033[2m'; C_C=$'\033[36m'; C_0=$'\033[0m'
+else FANCY=0; C_G=""; C_Y=""; C_R=""; C_B=""; C_D=""; C_C=""; C_0=""; fi
+OK="✔"; BAD="✖"; WARN="!"; [ "${TERM:-}" = linux ] && OK="+" && BAD="x"   # Linux VGA console lacks these glyphs
+LOG="$(mktemp /tmp/ovh-sniper-install.XXXXXX.log 2>/dev/null || echo /tmp/ovh-sniper-install.log)"; chmod 600 "$LOG" 2>/dev/null || true
+STEP=0; STEPS=9
+log()  { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || true; }
+info() { printf '  %s•%s %s\n' "$C_D" "$C_0" "$*"; log "INFO $*"; }
+ok()   { printf '  %s%s%s %s\n' "$C_G" "$OK" "$C_0" "$*"; log "OK $*"; }
+warn() { printf '  %s%s%s %s\n' "$C_Y" "$WARN" "$C_0" "$*" >&2; log "WARN $*"; }
+die()  { printf '\n  %s%s %s%s\n' "$C_R$C_B" "$BAD" "$*" "$C_0" >&2; log "FAIL $*"
+         printf '  %s%s %s%s\n\n' "$C_D" "$(t "Full log:" "完整日志：")" "$LOG" "$C_0" >&2; exit 1; }
+step() { STEP=$((STEP + 1)); printf '\n%s[%d/%d]%s %s%s%s\n' "$C_C$C_B" "$STEP" "$STEPS" "$C_0" "$C_B" "$*" "$C_0"; log "STEP $STEP/$STEPS $*"; }
+# run "label" cmd args… : command output goes to $LOG; a spinner shows on a terminal; on failure the log tail is printed
+run() {
+  local label="$1"; shift
+  local t0=$SECONDS rc=0 pid i=0 fr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  log "RUN $label: $*"
+  if [ "$FANCY" = 1 ]; then
+    "$@" >>"$LOG" 2>&1 </dev/null & pid=$!
+    printf '\033[?25l'; trap 'kill "$pid" 2>/dev/null; printf "\033[?25h\n"; exit 130' INT TERM
+    while kill -0 "$pid" 2>/dev/null; do
+      printf '\r  %s%s%s %s %s(%ds)%s' "$C_C" "${fr:i++%10:1}" "$C_0" "$label" "$C_D" $((SECONDS - t0)) "$C_0"; sleep 0.1
+    done
+    wait "$pid" || rc=$?
+    trap - INT TERM; printf '\r\033[K\033[?25h'
+  else
+    printf '  … %s\n' "$label"; "$@" >>"$LOG" 2>&1 </dev/null || rc=$?
+  fi
+  if [ "$rc" = 0 ]; then ok "$label $C_D($((SECONDS - t0))s)$C_0"; return 0; fi
+  printf '  %s%s%s %s %s(exit %d)%s\n' "$C_R" "$BAD" "$C_0" "$label" "$C_D" "$rc" "$C_0" >&2
+  printf '  %s%s%s\n' "$C_D" "$(t "Last lines of the log:" "日志最后几行：")" "$C_0" >&2
+  tail -n 15 "$LOG" | sed "s/^/    │ /" >&2
+  return "$rc"
+}
+banner() {
+  local cols; cols=$(tput cols 2>/dev/null || echo 80)
+  local g=("" "" "" "" "" "")
+  if [ "$FANCY" = 1 ]; then g=($'\033[38;5;51m' $'\033[38;5;45m' $'\033[38;5;39m' $'\033[38;5;33m' $'\033[38;5;27m' $'\033[38;5;63m'); fi
+  printf '\n'
+  local art
+  if [ "$cols" -ge 78 ] && [ "${TERM:-}" != linux ]; then art=(
+'███████╗████████╗ ██████╗  ██████╗██╗  ██╗██╗  ██╗ █████╗ ██╗    ██╗██╗  ██╗'
+'██╔════╝╚══██╔══╝██╔═══██╗██╔════╝██║ ██╔╝██║  ██║██╔══██╗██║    ██║██║ ██╔╝'
+'███████╗   ██║   ██║   ██║██║     █████╔╝ ███████║███████║██║ █╗ ██║█████╔╝ '
+'╚════██║   ██║   ██║   ██║██║     ██╔═██╗ ██╔══██║██╔══██║██║███╗██║██╔═██╗ '
+'███████║   ██║   ╚██████╔╝╚██████╗██║  ██╗██║  ██║██║  ██║╚███╔███╔╝██║  ██╗'
+'╚══════╝   ╚═╝    ╚═════╝  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝')
+  else art=(
+' ___ _           _   _  _             _   '
+'/ __| |_ ___  __| |_| || |__ ___ __ _| |__'
+'\__ \  _/ _ \/ _| / / __ / _` \ V  V / / /'
+'|___/\__\___/\__|_\_\_||_\__,_|\_/\_/|_\_\')
+  fi
+  local n; for n in "${!art[@]}"; do printf ' %s%s%s\n' "${g[n]}" "${art[n]}" "$C_0"; done
+  printf '  %sfor OVH%s  %sv%s · %s%s\n' "$C_C$C_B" "$C_0" "$C_D" "$INSTALLER_VERSION" \
+    "$(t "self-hosted OVH stock watcher & auto-order panel · unofficial" "自托管 OVH 独服库存监控与自动下单面板 · 非官方")" "$C_0"
+}
+# box "title" line… : summary box (open on the right, so CJK widths can't misalign it)
+box() {
+  local title="$1" l; shift
+  printf '\n  %s╭─%s %s%s%s %s──────────────────────────────────────────────%s\n' "$C_C" "$C_0" "$C_B" "$title" "$C_0" "$C_C" "$C_0"
+  for l in "$@"; do printf '  %s│%s  %s\n' "$C_C" "$C_0" "$l"; done
+  printf '  %s╰──────────────────────────────────────────────────────────%s\n\n' "$C_C" "$C_0"
+}
 # messages: English by default; Chinese with OVH_SNIPER_LANG=zh (or DEFAULT_LANG=zh in .env)
 _lang() { local l="${OVH_SNIPER_LANG:-}"; [ -n "$l" ] || l=$(sed -n 's/^DEFAULT_LANG=//p' "${DIR:-.}/.env" 2>/dev/null | tail -n1); printf '%s' "${l:-en}"; }
 t() { if [ "$(_lang)" = zh ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
@@ -51,7 +115,7 @@ if [ "${OVH_SNIPER_NONINTERACTIVE:-0}" != "1" ] && (exec </dev/tty) 2>/dev/null;
 ask() { # ask "提示" 默认值 -> 输出答案
   local prompt="$1" def="${2:-}" ans=""
   if [ "$HAVE_TTY" = 1 ]; then
-    read -r -p "$prompt${def:+ [$def]}: " ans </dev/tty || true
+    read -r -p "  ${C_C}?${C_0} $prompt${def:+ ${C_D}[$def]${C_0}}: " ans </dev/tty || true
   fi
   printf '%s' "${ans:-$def}"
 }
@@ -82,19 +146,17 @@ apt_install() {
   local missing=() p
   for p in "$@"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
   [ "${#missing[@]}" -eq 0 ] && return 0
-  info "$(t "Installing dependencies: ${missing[*]}" "安装依赖：${missing[*]}")"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq "${missing[@]}" >/dev/null
+  run "$(t "apt-get update" "更新软件源")" apt-get update -qq || die "$(t "apt-get update failed" "apt-get update 失败")"
+  run "$(t "Installing ${missing[*]}" "安装 ${missing[*]}")" apt-get install -y -qq "${missing[@]}" || die "$(t "Installing dependencies failed" "安装依赖失败")"
 }
 
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
-    info "$(t "Docker already installed: $(docker --version 2>/dev/null | head -n1)" "Docker 已安装：$(docker --version 2>/dev/null | head -n1)")"
+    ok "$(t "Docker already installed: $(docker --version 2>/dev/null | head -n1)" "Docker 已安装：$(docker --version 2>/dev/null | head -n1)")"
   else
-    info "$(t "Installing Docker (official script get.docker.com)" "安装 Docker（官方脚本 get.docker.com）")"
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-    sh /tmp/get-docker.sh >/dev/null
+    run "$(t "Downloading get.docker.com" "下载 get.docker.com")" curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || die "$(t "Could not download the Docker install script" "无法下载 Docker 安装脚本")"
+    run "$(t "Installing Docker (official script, takes a minute)" "安装 Docker（官方脚本，约一分钟）")" sh /tmp/get-docker.sh || die "$(t "Docker installation failed" "Docker 安装失败")"
     rm -f /tmp/get-docker.sh
   fi
   if command -v systemctl >/dev/null 2>&1; then systemctl enable --now docker >/dev/null 2>&1 || true; fi
@@ -103,6 +165,7 @@ install_docker() {
     apt_install docker-compose-plugin || die "$(t "Could not install docker compose; install it manually and retry" "无法安装 docker compose，请手动安装后重试")"
   fi
   docker info >/dev/null 2>&1 || die "$(t "Docker is not running (see systemctl status docker)" "Docker 没有运行（systemctl status docker 查看原因）")"
+  ok "$(t "Docker is running ($(dc version --short 2>/dev/null | head -n1 | sed 's/^/compose /'))" "Docker 运行正常（$(dc version --short 2>/dev/null | head -n1 | sed 's/^/compose /')）")"
 }
 
 ensure_swap() {
@@ -110,7 +173,7 @@ ensure_swap() {
   local mem_kb swap_kb size_mb free_mb
   mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
   swap_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
-  if [ "$mem_kb" -ge 1048576 ] || [ "$swap_kb" -ge 524288 ]; then return 0; fi
+  if [ "$mem_kb" -ge 1048576 ] || [ "$swap_kb" -ge 524288 ]; then ok "$(t "Memory $((mem_kb / 1024)) MB, swap $((swap_kb / 1024)) MB: enough" "内存 $((mem_kb / 1024)) MB，swap $((swap_kb / 1024)) MB：足够")"; return 0; fi
   info "$(t "Memory $((mem_kb / 1024)) MB < 1 GB and no swap: creating swap (needed to build the image)" "内存 $((mem_kb / 1024)) MB < 1 GB 且没有 swap，创建 swap（构建镜像需要）")"
   free_mb=$(df -Pm / | awk 'NR==2{print $4}')
   size_mb=2048; [ "$free_mb" -lt 6144 ] && size_mb=1024
@@ -122,7 +185,7 @@ ensure_swap() {
   fi
   if swapon /swapfile 2>/dev/null; then
     grep -qE '^/swapfile\s' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    info "$(t "Enabled ${size_mb} MB swap (/swapfile)" "已启用 ${size_mb} MB swap（/swapfile）")"
+    ok "$(t "Enabled ${size_mb} MB swap (/swapfile)" "已启用 ${size_mb} MB swap（/swapfile）")"
   else
     warn "$(t "Could not enable swap (common on OpenVZ/LXC); continuing — the build may fail if memory runs out" "无法启用 swap（OpenVZ/LXC 容器常见），继续安装；内存不足时构建可能失败")"
   fi
@@ -130,8 +193,7 @@ ensure_swap() {
 
 fetch_code() {
   if [ -d "$DIR/.git" ]; then
-    info "$(t "Updating code: $DIR" "更新代码：$DIR")"
-    git -C "$DIR" pull --ff-only origin "$BRANCH" || warn "$(t "git pull failed (local changes?); continuing with the existing code" "git pull 失败（本地有改动？），继续使用现有代码")"
+    run "$(t "Updating code: $DIR ($BRANCH)" "更新代码：$DIR（$BRANCH）")" git -C "$DIR" pull --ff-only origin "$BRANCH" || warn "$(t "git pull failed (local changes?); continuing with the existing code" "git pull 失败（本地有改动？），继续使用现有代码")"
     return 0
   fi
   if [ -f "$DIR/docker-compose.yml" ] && [ -d "$DIR/app" ]; then
@@ -142,13 +204,13 @@ fetch_code() {
   if [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     die "$(t "$DIR exists, is not empty and is not this project; choose another OVH_SNIPER_DIR or clean it up first" "$DIR 已存在且不是空目录，也不是本项目，请换一个 OVH_SNIPER_DIR 或先清理")"
   fi
-  info "$(t "Downloading code: $REPO ($BRANCH) → $DIR" "下载代码：$REPO（$BRANCH）→ $DIR")"
-  if ! git clone -q --depth 1 -b "$BRANCH" "$REPO" "$DIR"; then
+  if ! run "$(t "Downloading code: $REPO ($BRANCH)" "下载代码：$REPO（$BRANCH）")" git clone -q --depth 1 -b "$BRANCH" "$REPO" "$DIR"; then
     case "$REPO" in
       https://github.com/*)
         local slug="${REPO#https://github.com/}"; slug="${slug%.git}"
         warn "$(t "git clone failed, falling back to a tarball" "git clone 失败，改用 tar 包下载")"
-        curl -fsSL "https://codeload.github.com/$slug/tar.gz/refs/heads/$BRANCH" | tar -xz -C "$DIR" --strip-components=1 \
+        run "$(t "Downloading tarball from codeload.github.com" "从 codeload.github.com 下载 tar 包")" \
+          bash -c 'curl -fsSL "$1" | tar -xz -C "$2" --strip-components=1' _ "https://codeload.github.com/$slug/tar.gz/refs/heads/$BRANCH" "$DIR" \
           || die "$(t "Download failed; check the network or the repository URL" "下载失败，请检查网络或仓库地址")"
         ;;
       *) die "$(t "git clone failed: $REPO" "git clone 失败：$REPO")" ;;
@@ -166,7 +228,7 @@ port_in_use() {
 write_env() {
   cd "$DIR"
   if [ -f .env ]; then
-    info "$(t "Keeping the existing .env (SECRET_KEY unchanged)" "保留已有 .env（SECRET_KEY 不变）")"
+    ok "$(t "Keeping the existing .env (SECRET_KEY unchanged)" "保留已有 .env（SECRET_KEY 不变）")"
     grep -q '^SECRET_KEY=..*' .env || die "$(t "No SECRET_KEY in .env; check $DIR/.env" ".env 里没有 SECRET_KEY，请检查 $DIR/.env")"
     chmod 600 .env
     return 0
@@ -184,7 +246,7 @@ write_env() {
     break
   done
   bind="${OVH_SNIPER_BIND:-0.0.0.0}"
-  info "$(t "Generating .env (random SECRET_KEY, port $port)" "生成 .env（随机 SECRET_KEY，端口 $port）")"
+  ok "$(t "Generating .env (random SECRET_KEY, port $port)" "生成 .env（随机 SECRET_KEY，端口 $port）")"
   umask 077
   cat > .env <<ENV
 # Generated by install.sh. ⚠ SECRET_KEY encrypts the saved OVH keys and signs login sessions:
@@ -207,36 +269,41 @@ ENV
   chmod 600 .env
 }
 
-start_app() {
+healthy() { dc exec -T "$SERVICE" python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3)" >/dev/null 2>&1; }
+wait_healthy() { local _; for _ in $(seq 1 60); do healthy && return 0; sleep 2; done; return 1; }
+
+build_app() {
   cd "$DIR"
   mkdir -p data
-  info "$(t "Building and starting (the first time takes a few minutes)" "构建并启动（第一次需要几分钟）")"
-  dc up -d --build
-  info "$(t "Waiting for the app to start" "等待应用启动")"
-  for _ in $(seq 1 60); do
-    if dc exec -T "$SERVICE" python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3)" >/dev/null 2>&1; then
-      info "$(t "App is up" "应用已启动")"; return 0
-    fi
-    sleep 2
-  done
-  dc logs --tail 50 "$SERVICE" >&2 || true
-  die "$(t "The app did not start within 120 s; see the logs above (cd $DIR && docker compose logs)" "应用 120 秒内没有启动成功，日志见上方（cd $DIR && docker compose logs）")"
+  run "$(t "Building the image (the first time takes a few minutes)" "构建镜像（第一次需要几分钟）")" dc build \
+    || die "$(t "Building the image failed (low memory? see the log)" "构建镜像失败（内存不足？请看日志）")"
+}
+
+start_app() {
+  cd "$DIR"
+  run "$(t "Starting the container" "启动容器")" dc up -d || die "$(t "Starting the container failed" "启动容器失败")"
+  if ! run "$(t "Waiting for the health check" "等待健康检查")" wait_healthy; then
+    dc logs --tail 80 "$SERVICE" >>"$LOG" 2>&1 || true
+    dc logs --tail 20 "$SERVICE" 2>&1 | sed 's/^/    │ /' >&2 || true
+    die "$(t "The app did not start within 120 s (cd $DIR && docker compose logs)" "应用 120 秒内没有启动成功（cd $DIR && docker compose logs）")"
+  fi
 }
 
 create_owner() {
   cd "$DIR"
   if dc exec -T "$SERVICE" python -m app.cli has-owner >/dev/null 2>&1; then
-    info "$(t "An owner account already exists, skipping (forgot the password? ovh-sniper reset-password)" "已有所有者账号，跳过创建（忘记密码：ovh-sniper reset-password）")"
+    ok "$(t "An owner account already exists, skipping (forgot the password? ovh-sniper reset-password)" "已有所有者账号，跳过创建（忘记密码：ovh-sniper reset-password）")"
     return 0
   fi
   if [ -n "${OVH_SNIPER_ADMIN_USER:-}" ] && [ -n "${OVH_SNIPER_ADMIN_PASSWORD:-}" ]; then
     info "$(t "Creating owner account $OVH_SNIPER_ADMIN_USER" "创建所有者账号 $OVH_SNIPER_ADMIN_USER")"
     printf '%s\n' "$OVH_SNIPER_ADMIN_PASSWORD" | dc exec -T "$SERVICE" python -m app.cli create-admin \
-      -u "$OVH_SNIPER_ADMIN_USER" --password-stdin || die "$(t "Creating the account failed (password needs ≥10 characters of at least two kinds)" "创建账号失败（密码需 ≥10 位且至少包含两类字符）")"
+      -u "$OVH_SNIPER_ADMIN_USER" --password-stdin >>"$LOG" 2>&1 || die "$(t "Creating the account failed (password needs ≥10 characters of at least two kinds)" "创建账号失败（密码需 ≥10 位且至少包含两类字符）")"
+    ok "$(t "Owner account $OVH_SNIPER_ADMIN_USER created" "所有者账号 $OVH_SNIPER_ADMIN_USER 已创建")"
     return 0
   fi
   if [ "$HAVE_TTY" = 1 ]; then
-    printf "\n%s$(t 'Create the owner account' '创建所有者账号')%s$(t ' (single-account app, no sign-up page; password ≥10 characters of two kinds)' '（本应用只有一个账号，没有注册页面；密码至少 10 位，包含两类字符）')\n" "$C_B" "$C_0"
+    printf "  %s$(t 'Create the owner account' '创建所有者账号')%s$(t ' (single-account app, no sign-up page; password ≥10 characters of two kinds)' '（本应用只有一个账号，没有注册页面；密码至少 10 位，包含两类字符）')\n" "$C_B" "$C_0"
     local tries
     for tries in 1 2 3; do
       if dc exec "$SERVICE" python -m app.cli create-admin </dev/tty >/dev/tty 2>&1; then return 0; fi
@@ -251,6 +318,7 @@ install_cli() {
   local bin="${OVH_SNIPER_BIN_DIR:-/usr/local/bin}"
   mkdir -p "$bin"
   ln -sf "$DIR/manage.sh" "$bin/ovh-sniper"
+  ok "$(t "Command installed: $bin/ovh-sniper" "管理命令已安装：$bin/ovh-sniper")"
 }
 
 public_ip() {
@@ -262,33 +330,49 @@ public_ip() {
 
 finish() {
   cd "$DIR"
-  local port bind host
+  local port bind host url
   port=$(sed -n 's/^PORT=//p' .env | tail -n1); port="${port:-8000}"
   bind=$(sed -n 's/^BIND_ADDR=//p' .env | tail -n1); bind="${bind:-0.0.0.0}"
   if [ "$bind" = "0.0.0.0" ]; then host=$(public_ip); else host="$bind"; fi
-  printf "\n%s$(t 'Installation complete' '安装完成')%s\n" "$C_B" "$C_0"
-  printf "  $(t 'URL:' '访问地址：') %shttp://%s:%s%s\n" "$C_G" "$host" "$port" "$C_0"
-  printf "  $(t 'Directory:' '安装目录：') %s $(t '(config .env, data data/)' '（配置 .env，数据 data/）')\n" "$DIR"
-  printf "  $(t 'Commands:' '常用命令：') ovh-sniper status | logs | update | backup | reset-password | uninstall\n"
+  url="http://$host:$port"
+  local title; if [ "$MODE" = update ]; then title="$(t "StockHawk for OVH is up to date" "StockHawk for OVH 已更新")"; else title="$(t "Installation complete" "安装完成")"; fi
+  box "$C_G$OK$C_0 $title" \
+    "$(t "Panel     " "面板地址  ") $C_G$C_B$url$C_0" \
+    "$(t "Directory " "安装目录  ") $DIR $C_D$(t "(config .env, data data/)" "（配置 .env，数据 data/）")$C_0" \
+    "$(t "Log       " "安装日志  ") $C_D$LOG$C_0" \
+    "" \
+    "$(t "Commands  " "常用命令  ") ${C_C}ovh-sniper${C_0} status · logs · update · backup · reset-password · uninstall" \
+    "" \
+    "$C_Y$(t "HTTPS" "HTTPS")$C_0 $(t "this is plain HTTP. Set up HTTPS (Caddy or Cloudflare, see README)," "现在是 HTTP 明文。正式使用前请配置 HTTPS（Caddy 或 Cloudflare，见 README），")" \
+    "      $(t "then COOKIE_SECURE=1, BIND_ADDR=127.0.0.1 in .env and ovh-sniper restart." "然后在 .env 设 COOKIE_SECURE=1、BIND_ADDR=127.0.0.1，再 ovh-sniper restart。")" \
+    "" \
+    "$(t "★ Star on GitHub" "★ GitHub 点个 Star")  ${C_C}https://github.com/super888-png/stockhawk-ovh$C_0" \
+    "$(t "Website         " "官网            ")  ${C_C}https://www.7919.net$C_0"
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     warn "$(t "ufw firewall is active; if you can't connect run: ufw allow $port/tcp" "检测到 ufw 防火墙已启用，如无法访问请运行：ufw allow $port/tcp")"
   fi
-  printf "\n  %s$(t 'Tip' '建议')%s$(t ': this is plain HTTP. Before real use set up HTTPS (Caddy or Cloudflare Tunnel, see README),' '：现在是 HTTP 明文访问。正式使用前请配置 HTTPS（Caddy 或 Cloudflare Tunnel，见 README），')\n" "$C_Y" "$C_0"
-  printf "  $(t 'then set COOKIE_SECURE=1 and BIND_ADDR=127.0.0.1 in .env and run ovh-sniper restart.' '然后在 .env 设置 COOKIE_SECURE=1、BIND_ADDR=127.0.0.1，再运行 ovh-sniper restart。')\n\n"
 }
 
 main() {
   cd / # 当前目录可能已被删除（例如刚卸载过），git/docker 需要有效的工作目录
+  MODE=install; [ -f "$DIR/.env" ] && MODE=update
+  banner
+  if [ "$MODE" = update ]; then info "$(t "Existing install found in $DIR: updating it (.env and data/ are kept)" "在 $DIR 发现已有安装：将原地更新（保留 .env 和 data/）")"; fi
+  step "$(t "Checking the system" "检查系统")"
   need_root
   check_os
+  ok "$(t "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}") · $(uname -m)" "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}") · $(uname -m)")"
   apt_install ca-certificates curl git
-  install_docker
-  ensure_swap
-  fetch_code
-  write_env
-  start_app
-  create_owner
-  install_cli
+  step "$(t "Docker" "Docker")";                     install_docker
+  step "$(t "Memory & swap" "内存与 swap")";         ensure_swap
+  step "$(t "Fetching the code" "获取代码")";        fetch_code
+  # the log lives next to the app from here on (it can't be there before the clone: git needs an empty directory)
+  if [ -d "$DIR" ] && cat "$LOG" >>"$DIR/install.log" 2>/dev/null; then rm -f "$LOG"; LOG="$DIR/install.log"; chmod 600 "$LOG"; fi
+  step "$(t "Configuration (.env)" "配置（.env）")";  write_env
+  step "$(t "Building the image" "构建镜像")";       build_app
+  step "$(t "Starting the app" "启动应用")";         start_app
+  step "$(t "Owner account" "所有者账号")";          create_owner
+  step "$(t "Management command" "管理命令")";       install_cli
   finish
 }
 
