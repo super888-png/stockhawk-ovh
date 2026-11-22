@@ -1,0 +1,25 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("系统状态") }}{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>{{ _("系统状态") }}</h1><p>{{ _("库存轮询、OVH 请求量与账号审计日志") }}</p></div></div>
+<div class="stats">
+  <div class="stat"><div class="k">{{ _("运行中任务") }}</div><div class="v">{{ running.values()|sum }}</div><div class="d">{{ _("后台抢购进程") }}</div></div>
+  <div class="stat"><div class="k">{{ _("库存轮询") }}</div><div class="v">{{ feeds|length }}</div><div class="d">{{ _("型号 × 区域（同型号任务共享）") }}</div></div>
+  <div class="stat"><div class="k">{{ _("OVH 请求") }}</div><div class="v">{{ total_requests }}</div><div class="d">{{ _("本次启动以来") }}</div></div>
+  <div class="stat"><div class="k">{{ _("所有者") }}</div><div class="v" style="font-size:18px">{{ user.username }}</div><div class="d">{{ _("单用户模式 · 账号在服务器上用命令行管理") }}</div></div>
+</div>
+<div class="card">
+  <h2>{{ ic("radar-chart") }} {{ _("库存轮询") }}</h2>
+  <div class="tablewrap">{% if not feeds %}<div class="empty">{{ ic("cloud-server") }}{{ _("当前没有运行中的轮询") }}</div>{% else %}
+  <table class="t"><thead><tr><th>{{ _("区域") }}</th><th>planCode</th><th class="num">{{ _("订阅任务") }}</th><th>{{ _("页面查看") }}</th><th class="num">{{ _("间隔") }}</th><th class="num">{{ _("已轮询") }}</th><th class="num">{{ _("耗时") }}</th><th>{{ _("错误") }}</th></tr></thead>
+  <tbody>{% for f in feeds %}<tr><td>{{ f.endpoint }}</td><td><code>{{ f.plan }}</code></td><td class="num">{{ f.subscribers }}</td><td>{% if f.viewers %}<span class="tag cyan">{{ _("查看中") }}</span>{% endif %}</td><td class="num">{{ f.interval }}s</td><td class="num">{{ f.polls }}</td><td class="num">{{ f.last_ms }}ms</td><td class="small">{{ f.error or "" }}</td></tr>{% endfor %}</tbody></table>{% endif %}</div>
+</div>
+<div class="card">
+  <h2>{{ ic("history") }} {{ _("审计日志") }} <span class="muted small">{{ _("最近 100 条") }}</span></h2>
+  <div class="tablewrap">{% if not audits %}<div class="empty">{{ ic("history") }}{{ _("暂无记录") }}</div>{% else %}
+  <table class="t"><thead><tr><th>{{ _("时间") }}</th><th>{{ _("账号") }}</th><th>{{ _("操作") }}</th><th>{{ _("详情") }}</th><th>IP</th></tr></thead>
+  <tbody>{% for a in audits %}<tr><td class="mono small">{{ a.ts|lt }}</td><td>{{ names.get(a.user_id, "-" if a.user_id is none else "#%d"|format(a.user_id)) }}</td>
+  <td>{% if a.action in ("login_fail", "password_fail") %}<span class="tag amber">{{ ACTION_CN.get(a.action, a.action) }}</span>{% else %}{{ ACTION_CN.get(a.action, a.action) }}{% endif %}</td>
+  <td class="small wrap">{{ a.detail }}</td><td class="mono small muted">{{ a.ip }}</td></tr>{% endfor %}</tbody></table>{% endif %}</div>
+  <p class="muted small" style="margin:10px 0 0">{{ _("忘记密码：在服务器上运行") }} <code>docker compose exec ovh-sniper python -m app.cli reset-password</code></p>
+</div>
+{% endblock %}

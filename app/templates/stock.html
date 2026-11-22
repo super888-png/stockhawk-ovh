@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% from "_stockui.html" import stock_filters, stock_table with context %}{% block title %}{{ _("实时库存") }}{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <div><h1>{{ _("实时库存") }}</h1><p>{{ _("数据来自 OVH 公开库存接口，与抢购任务共享同一份轮询缓存（每个型号最快 {0} 秒刷新一次）", [MIN_POLL, 10]|max|round(0)|int) }}</p></div>
+  <div class="livebar"><span class="dot off" id="dot"></span><span id="upd">{{ _("未开始") }}</span></div>
+</div>
+<div class="card">
+{{ stock_filters(False) }}
+</div>
+{{ stock_table(False, "fxline") }}
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ csp_nonce }}" src="/static/stocktable.js?v=1"></script>
+<script nonce="{{ csp_nonce }}">
+const sb = new StockBrowser({select: false, storageKey: 'ovhsn.stock.v1', subs: {{ SUBSIDIARIES|tojson }}, mine: {{ mine|tojson }}, fxId: 'fxline'});
+sb.loadCatalog(); sb.load();
+</script>
+{% endblock %}

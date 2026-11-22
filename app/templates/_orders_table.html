@@ -1,0 +1,23 @@
+{% from "_macros.html" import ic %}
+<div class="tablewrap">
+{% if not orders %}<div class="empty">{{ ic("shopping-cart") }}{{ _("暂无订单或预览记录") }}<br><span class="small">{{ _("任务匹配到库存后，预览和订单会出现在这里") }}</span></div>{% else %}
+<table class="t">
+<thead><tr><th>{{ _("时间") }}</th><th>{{ _("类型") }}</th><th>{{ _("型号") }}</th><th>{{ _("机房") }}</th><th>{{ _("配置") }}</th><th class="num">{{ _("首期含税") }}</th><th>{{ _("OVH 订单") }}</th><th>{{ _("状态") }}</th><th></th></tr></thead>
+<tbody>{% for o in orders %}
+<tr>
+  <td class="mono small">{{ o.ts|lt }}</td>
+  <td>{% if o.kind == "order" %}<span class="tag accent">{{ _("订单") }}</span>{% elif o.kind == "pending" %}<span class="tag amber">{{ _("待确认") }}</span>{% else %}<span class="tag gray">{{ _("预览") }}</span>{% endif %}</td>
+  {% set op = order_plan(o) %}<td class="name"><b>{{ op.name }}</b>{% if op.known %} <code class="pc">{{ o.plan_code }}</code>{% endif %}{% if o.task_id %} <a class="small" href="/tasks/{{ o.task_id }}">#{{ o.task_id }}</a>{% endif %}{% if op.cpu %}<small>{{ op.cpu }}</small>{% endif %}</td>
+  <td>{{ DC_LABEL.get(o.dc, o.dc) }}</td>
+  <td class="small wrap cfg"><span title="{{ o.memory }}">{{ op.memL or "-" }}</span><br><span title="{{ o.storage }}">{{ op.stoL or "-" }}</span></td>
+  {% set m = order_money(o) %}<td class="num price">{{ m.text }}{% if m.cny %}<span class="cny">{{ m.cny }}</span>{% endif %}</td>
+  <td{% if o.order_id %} data-oid="{{ o.order_id }}"{% endif %}>{% if o.order_id %}<code>{{ o.order_id }}</code>{% endif %}{% if o.url %} <a href="{{ o.url }}" target="_blank" rel="noopener noreferrer">{{ ic("link") }} {{ _("付款/查看") if o.kind == "order" and not o.paid_at else _("查看") }}</a>{% endif %}{% if o.order_id %} <span class="acct-st"></span>{% endif %}</td>
+  <td class="small">{% if o.kind == "order" %}
+      {% if o.track_state == "cancelled" %}<span class="tag gray">{{ _("已取消") }}</span>
+      {% elif o.delivered_at %}<span class="tag green">{{ ic("check-circle") }} {{ _("已交付") }}</span>{% if '"lottery": true' in (o.spec_json or "") %} <span class="tag amber" title="{{ _("实际配置优于官方") }}">{{ ic("crown-f") }} {{ _("中奖") }}</span>{% endif %}
+      {% elif o.paid_at %}<span class="tag cyan">{{ _("已付款 · 交付中") }}</span>
+      {% else %}<span class="tag amber">{{ _("待付款") }}</span>{% endif %}
+    {% elif o.kind == "pending" %}<span class="tag amber">{{ _("需人工确认") }}</span>{% else %}<span class="muted">{{ _("预览成功") if o.status == "dry-run" else o.status }}</span>{% endif %}</td>
+  <td class="actions">{% if o.kind != "preview" %}<a class="btn sm ghost" href="/orders/{{ o.id }}">{{ _("详情") }}</a>{% endif %}</td>
+</tr>{% endfor %}</tbody></table>{% endif %}
+</div>

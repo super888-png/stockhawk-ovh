@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("订单记录") }}{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>{{ _("订单记录") }}</h1>
+<p>{{ _("「账号订单」通过你保存的 OVH 密钥只读获取（近 90 天，缓存 5 分钟）；账号里的服务器在") }}<a href="/#myservers">{{ _("控制台 · 我的服务器") }}</a>{{ _("。下方「本站记录」是本站任务产生的下单与预览。") }}</p></div>
+{% if account_eps %}<div class="row"><span class="muted small" id="acctAge"></span>
+<button class="sm" id="acctRefresh" type="button">{{ ic("reload") }} {{ _("刷新") }}</button></div>{% endif %}
+</div>
+
+{% if not account_eps %}
+<div class="card"><div class="empty">{{ ic("key") }}{{ _("还没有可用的 OVH 密钥。") }}<a href="/keys">{{ _("保存并验证密钥") }}</a>{{ _("后，这里会显示账号近 90 天的订单。") }}</div></div>
+{% else %}
+<div id="acct">
+  {% for ep in account_eps %}
+  <section class="acct" data-ep="{{ ep }}">
+    <div class="acct-notice"></div>
+    <div class="card">
+      <div class="row between"><h2>{{ ic("file-text") }} {{ _("账号订单") }} <span class="muted small">{{ _("近 90 天") }}</span> {% if account_eps|length > 1 %}<span class="tag gray">{{ ep }}</span>{% endif %}</h2><span class="muted small" data-slot="ord-count"></span></div>
+      <div class="tablewrap" data-slot="orders">
+        <table class="t acct-t"><thead><tr><th>{{ _("日期") }}</th><th>{{ _("订单号") }}</th><th>{{ _("内容") }}</th><th class="num">{{ _("金额（含税）") }}</th><th>{{ _("状态") }}</th><th>{{ _("付款") }}</th><th></th></tr></thead>
+        <tbody>{% for i in range(4) %}<tr class="sk-row"><td><div class="sk w80"></div></td><td><div class="sk w60"></div></td><td><div class="sk w90"></div></td><td><div class="sk w50 r"></div></td><td><div class="sk w50"></div></td><td><div class="sk w60"></div></td><td><div class="sk w40"></div></td></tr>{% endfor %}</tbody></table>
+      </div>
+    </div>
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ ic("history") }} {{ _("本站记录") }}</h2>
+  <p class="sub">{{ _("「订单」= 真实结账生成的 OVH 订单；「预览」= DRY-RUN 建购物车读取首期价格（未付款、已删除）；「待确认」= 结账请求异常，需到 OVH 控制台核对。订单号与账号订单一致时会显示其在 OVH 的当前状态。") }}</p>
+  {% include "_orders_table.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}{% if account_eps %}
+<script nonce="{{ csp_nonce }}">
+window.ACCT = {appOrders: {{ app_orders|tojson }}, guide: {{ guide|tojson }}, tz: {{ TZNAME|tojson }}, want: ["orders"]};
+</script>
+<script nonce="{{ csp_nonce }}" src="/static/account.js?v=8"></script>
+{% endif %}{% endblock %}

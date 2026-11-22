@@ -1,0 +1,72 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("订单") }} {{ o.order_id or o.id }}{% endblock %}
+{% macro disks(d) %}{% for x in d.disks %}{{ x.n }}×{{ ("%g TB"|format(x.gb / 1000)) if x.gb >= 1000 else ("%g GB"|format(x.gb)) }} {{ {3: "NVMe", 2: "SSD", 1: "SAS", 0: "HDD"}.get(x.rank, x.type or "") }}{{ " + " if not loop.last }}{% else %}-{% endfor %}{% endmacro %}
+{% block content %}
+{% set act = spec.actual if spec else none %}
+<div class="pagehead">
+  <div><h1>{{ _("订单") if o.kind == "order" else (_("待确认") if o.kind == "pending" else _("预览")) }} {% if o.order_id %}<code>#{{ o.order_id }}</code>{% endif %}</h1>
+  {% set op = order_plan(o) %}<p>{{ op.name }}{% if op.cpu %} · {{ op.cpu }}{% endif %}{% if op.known %} <code class="pc">{{ o.plan_code }}</code>{% endif %} {{ _("· {0} · 提交于", DC_LABEL.get(o.dc, o.dc)) }} {{ o.ts|lt }}{% if task %} · <a href="/tasks/{{ task.id }}">{{ _("任务 #") }}{{ task.id }} {{ task.name }}</a>{% endif %}</p></div>
+  <div class="row">
+    {% if o.url %}<a class="btn {{ 'primary' if not o.paid_at and o.kind == 'order' }}" href="{{ o.url }}" target="_blank" rel="noopener noreferrer">{{ ic("link") }} {{ _("去 OVH 付款") if not o.paid_at and o.kind == 'order' else _("在 OVH 查看") }}</a>{% endif %}
+    {% if o.kind == "order" %}<form method="post" action="/orders/{{ o.id }}/check" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ ic("reload") }} {{ _("立即检查") }}</button></form>{% endif %}
+    <a class="btn ghost" href="/orders">{{ _("返回订单记录") }}</a>
+  </div>
+</div>
+
+{% if spec and spec.lottery %}
+<div class="lottery">
+  <div class="lottery-ic">{{ ic("crown-f") }}</div>
+  <div><b>{{ _("恭喜中奖！这台机器的实际配置比官方配置更好") }}</b>
+    <ul>{% for u in spec.upgrades %}<li>{{ u }}</li>{% endfor %}</ul>
+    <span class="muted small">{{ _("OVH 偶尔会用更高配置的库存交付同一型号，俗称「开奖」。以上为交付硬件与官网目录规格的对比。") }}</span></div>
+</div>
+{% endif %}
+
+{% if o.kind == "order" %}
+<div class="card">
+  <h2>{{ ic("node-index") }} {{ _("进度") }}</h2>
+  <ol class="timeline">
+    <li class="done"><b>{{ _("提交订单") }}</b><span>{{ o.ts|lt }}</span></li>
+    <li class="{{ 'done' if o.paid_at else ('fail' if o.track_state == 'cancelled' else 'now') }}"><b>{{ _("已取消") if o.track_state == "cancelled" else _("付款") }}</b>
+      <span>{% if o.paid_at %}{{ o.paid_at|lt }}{% elif o.track_state == "cancelled" %}{{ _("订单已取消") }}{% else %}{{ _("等待付款") }}{% if (detail.payMode or "") == "order" %}{{ _("（只下单不付款模式，请到 OVH 付款）") }}{% endif %}{% endif %}</span></li>
+    <li class="{{ 'done' if o.delivered_at else ('now' if o.paid_at and o.track_state != 'cancelled' else '') }}"><b>{{ _("交付") }}</b>
+      <span>{% if o.delivered_at %}{{ o.delivered_at|lt }}{% elif o.track_state == "timeout" %}{{ _("跟踪超时（14 天），可点「立即检查」") }}{% elif o.paid_at %}{{ _("等待 OVH 交付") }}{% else %}{{ _("付款后开始") }}{% endif %}</span></li>
+  </ol>
+  <p class="muted small" style="margin:10px 0 0">{{ _("OVH 状态：") }}{% if o.ovh_status %}<span class="tag">{{ OVH_STATUS_CN.get(o.ovh_status, o.ovh_status) }}</span>{% else %}{{ _("尚未查询") }}{% endif %}
+  {% if o.track_state == "tracking" %} {{ _("· 自动跟踪中（前 2 小时每 2 分钟，之后每 10 分钟查询一次，最长 14 天）") }}{% endif %}</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ ic("cloud-server") }} {{ _("配置对比") }} <span class="muted small">{{ _("官方目录规格 vs 实际交付硬件") }}</span></h2>
+  {% if official or act %}
+  <div class="tablewrap"><table class="t cmp">
+    <thead><tr><th></th><th>{{ _("官方配置") }}</th><th>{{ _("实际交付") }}</th><th></th></tr></thead>
+    <tbody>
+      {% set oc = official.cpu if official else {} %}{% set ac = act.cpu if act else {} %}
+      <tr><td class="muted">CPU</td><td>{{ oc.model or "-" }}{% if oc.frequency %} <span class="muted small">{{ oc.frequency }} GHz{% if oc.boost %} / {{ oc.boost }} GHz{% endif %}</span>{% endif %}</td><td>{{ ac.model or _("待交付") }}</td>
+        <td>{% if act and spec.upgrades|select("search", "^CPU")|list %}<span class="tag green">{{ ic("arrow-up") }} {{ _("升级") }}</span>{% elif act and spec.downgrades|select("search", "^CPU")|list %}<span class="tag amber">{{ _("不同") }}</span>{% elif act %}<span class="tag gray">{{ _("一致") }}</span>{% endif %}</td></tr>
+      <tr><td class="muted">{{ _("核心 / 线程") }}</td><td>{{ oc.cores or "-" }} / {{ oc.threads or "-" }}</td><td>{% if act %}{{ ac.cores or "-" }} / {{ ac.threads or "-" }}{% else %}-{% endif %}</td><td></td></tr>
+      <tr><td class="muted">{{ _("内存") }}</td><td>{{ "%g GB"|format(official.ramGb) if official and official.ramGb else "-" }}</td><td>{{ "%g GB"|format(act.ramGb) if act and act.ramGb else (_("待交付") if not act else "-") }}</td>
+        <td>{% if act and spec.upgrades|select("search", _("^内存"))|list %}<span class="tag green">{{ ic("arrow-up") }} {{ _("升级") }}</span>{% elif act and spec.downgrades|select("search", _("^内存"))|list %}<span class="tag amber">{{ _("偏少") }}</span>{% elif act %}<span class="tag gray">{{ _("一致") }}</span>{% endif %}</td></tr>
+      <tr><td class="muted">{{ _("硬盘") }}</td><td>{{ disks(official) if official else "-" }}{% if official and official.raid %} <span class="muted small">{{ official.raid }}</span>{% endif %}</td><td>{{ disks(act) if act else _("待交付") }}</td>
+        <td>{% if act and spec.upgrades|select("search", _("^硬盘"))|list %}<span class="tag green">{{ ic("arrow-up") }} {{ _("升级") }}</span>{% elif act and spec.downgrades|select("search", _("^硬盘"))|list %}<span class="tag amber">{{ _("不同") }}</span>{% elif act %}<span class="tag gray">{{ _("一致") }}</span>{% endif %}</td></tr>
+      {% if oc.score %}<tr><td class="muted">{{ _("CPU 跑分") }}</td><td>{{ oc.score }}</td><td class="muted small">{{ _("按目录同型号 CPU 跑分比较") }}</td><td></td></tr>{% endif %}
+    </tbody></table></div>
+  {% if official and official.note %}<p class="muted small" style="margin:10px 0 0">{{ ic("info-circle") }} {{ official.note }}</p>{% endif %}
+  {% if not act %}<p class="muted small" style="margin:10px 0 0">{% if o.kind != "order" %}{{ _("预览记录没有实际交付的机器。") }}{% elif o.delivered_at %}{{ _("已交付，但没有找到对应的服务器（可能缺少 GET /dedicated/server 权限，请到「控制台 → 我的服务器」按提示重新授权后点「立即检查」）。") }}{% else %}{{ _("交付后自动读取服务器的实际硬件并对比；如抽到更高配置会通知你。") }}{% endif %}</p>{% endif %}
+  {% else %}<div class="empty">{{ ic("cloud-server") }}{{ _("目录中找不到该型号的官方规格") }}</div>{% endif %}
+</div>
+
+<div class="card">
+  <h2>{{ ic("profile") }} {{ _("订单信息") }}</h2>
+  <dl class="kv">
+    <dt>{{ _("型号") }}</dt><dd>{{ op.name }}{% if op.cpu %} · {{ op.cpu }}{% endif %} <code class="pc">{{ o.plan_code }}</code></dd>
+    <dt>{{ _("机房") }}</dt><dd>{{ DC_LABEL.get(o.dc, o.dc) or "-" }}</dd>
+    <dt>{{ _("内存 / 硬盘") }}</dt><dd>{{ op.memL or "-" }} · {{ op.stoL or "-" }}<br><span class="mono small muted">{{ o.memory or "-" }} / {{ o.storage or "-" }}</span></dd>
+    {% set m = order_money(o) %}<dt>{{ _("首期含税") }}</dt><dd>{{ m.text }}{% if m.cny %} <span class="muted">{{ m.cny }}</span>{% endif %}</dd>
+    <dt>{{ _("下单方式") }}</dt><dd>{{ PAY_MODE_CN.get(detail.payMode, "-") if detail.payMode else "-" }}</dd>
+    {% if spec %}<dt>{{ _("服务器") }}</dt><dd class="mono">{{ spec.server }}{% if spec.ip %} · {{ spec.ip }}{% endif %} <span class="muted small">{{ _("（{0}）", tr(spec.linkedBy)) }}</span></dd>{% endif %}
+    {% if o.kind == "pending" %}<dt>{{ _("说明") }}</dt><dd>{{ _("结账请求结果不确定，请到 OVH 控制台核对是否已下单") }}</dd>{% endif %}
+  </dl>
+</div>
+{% endblock %}

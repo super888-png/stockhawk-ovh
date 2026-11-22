@@ -1,0 +1,20 @@
+# Port, bind address etc. live in .env (PORT, BIND_ADDR, DEFAULT_LANG).
+# For customisations create docker-compose.override.yml (git-ignored) instead of editing this file, otherwise update.sh cannot git pull.
+services:
+  ovh-sniper:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${PORT:-8000}:8000"
+    # Give tasks that are checking out time to finish
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

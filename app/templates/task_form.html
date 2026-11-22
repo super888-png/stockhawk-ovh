@@ -1,0 +1,160 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% from "_stockui.html" import stock_filters, stock_table with context %}{% block title %}{{ _("新建任务") if is_new else _("编辑任务") }}{% endblock %}
+{% block content %}
+{% include "_running.html" %}
+<div class="pagehead"><div><h1>{{ _("新建抢购任务") if is_new else _("编辑任务 #%d")|format(t.id) }}</h1>
+<p>{{ _("一个任务可以同时盯多个型号，按优先级顺序下单；「最多下单数」对整个任务生效") }}</p></div></div>
+<form method="post" action="/tasks/save" id="tf">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% if not is_new %}<input type="hidden" name="id" value="{{ t.id }}">{% endif %}
+<input type="hidden" name="plans_json" id="plans_json">
+<div class="card">
+  <h2><span class="step">1</span> {{ _("选择机器") }} <span class="muted small" id="catinfo"></span><span class="grow"></span><span class="livebar small"><span class="dot off" id="dot"></span><span id="upd">{{ _("未开始") }}</span></span></h2>
+  <p class="muted small" style="margin:-4px 0 12px">{{ _("和「实时库存」同一套筛选和表格：点选行即加入任务（配置 × 机房），可跨型号批量选择；选择顺序 = 下单优先级") }}</p>
+{{ stock_filters(True, t) }}
+  <div style="margin-top:12px">{{ stock_table(True, "stockfx") }}</div>
+</div>
+
+<div class="card" id="selcard">
+  <h2><span class="step">2</span> {{ _("已选机器") }} <span class="tag accent" id="selcount"></span> <span class="muted small">{{ _("顺序 = 下单优先级；拖动或用 ↑/↓ 调整。每项可改内存 / 硬盘 / 带宽和机房（不选 = 任意）") }}</span></h2>
+  <ol class="seltray" id="tray"></ol>
+  <div class="optgrid">
+    <label class="optcard"><input type="checkbox" class="vh" role="switch" name="any_config" {% if t.any_config %}checked{% endif %}><div class="tx"><b>{{ ic("appstore") }} {{ _("允许非基础配置") }}</b><span>{{ _("内存/硬盘为「任意」时，也会买加价的可选配置；关闭时只买官网基础配置") }}</span></div><span class="tr"></span></label>
+  </div>
+  <details id="extras" style="display:none"><summary class="muted small">{{ _("可选附加项（许可证等，仅单型号任务可用，一般不需要）") }}</summary><div id="extralist" class="dcs"></div></details>
+</div>
+
+<div class="card">
+  <h2><span class="step">3</span> {{ _("下单规则") }}</h2>
+  <div class="grid4">
+    <label>{{ _("任务名称") }} <span class="hint">{{ _("可选") }}</span><input name="name" value="{{ t.name or '' }}" placeholder="{{ _("如：Rise 欧洲随便抢") }}"></label>
+    <label>{{ _("每单数量") }}<input type="number" name="quantity" min="1" max="10" value="{{ t.quantity }}"></label>
+    <label>{{ _("最多下单数") }} <span class="hint">{{ _("整个任务") }}</span><input type="number" name="max_orders" min="1" max="50" value="{{ t.max_orders }}"></label>
+    <label>{{ _("首期含税上限") }} <span class="hint">{{ _("留空 = 不限") }}</span> <span class="hint" id="capcny"></span><input type="number" step="0.01" name="price_cap" value="{{ t.price_cap if t.price_cap is not none else '' }}"></label>
+    <label>{{ _("轮询间隔（秒）") }} <span class="hint">{{ _("最小") }} {{ MIN_POLL|round(1) }}</span><input type="number" step="0.5" min="{{ MIN_POLL }}" name="poll_interval" value="{{ t.poll_interval }}"></label>
+    <label>{{ _("购买时长") }}<select name="duration">{% for d in ["P1M","P3M","P6M","P12M","P24M"] %}<option {% if t.duration==d %}selected{% endif %}>{{ d }}</option>{% endfor %}</select></label>
+    <label>{{ _("计费方式") }}<select name="pricing_mode" id="pricing_mode">
+      {% for v, lab in [("default",_("按月付（default）")),("upfront12",_("预付 12 个月（upfront12）")),("upfront24",_("预付 24 个月（upfront24）"))] %}<option value="{{ v }}" {% if t.pricing_mode==v %}selected{% endif %}>{{ lab }}</option>{% endfor %}
+      {% if t.pricing_mode not in ["default","upfront12","upfront24"] %}<option value="{{ t.pricing_mode }}" selected>{{ t.pricing_mode }}</option>{% endif %}</select></label>
+    <label>{{ _("系统 dedicated_os") }}<input name="os_code" value="{{ t.os_code }}"></label>
+    <label>{{ _("快速通道估价税率") }} <span class="hint">{{ _("按子公司自动填") }}</span><input type="number" step="0.001" min="1" max="2" name="vat_rate" id="vat_rate" value="{{ t.vat_rate }}"></label>
+  </div>
+
+  {% set pm = t.pay_mode %}
+  <label style="margin-top:18px">{{ _("下单方式") }}</label>
+  <div class="choices c4" role="radiogroup" aria-label="{{ _("下单方式") }}">
+    <label class="choice c-notify"><input type="radio" class="vh" name="pay_mode" value="notify" {% if pm=="notify" %}checked{% endif %}><span class="rd"></span>
+      <b>{{ ic("bell") }} {{ _("仅提醒") }} <span class="tag green">{{ _("无需密钥") }}</span></b>
+      <span class="d">{{ _("只监控公开库存，有匹配的库存时发 Telegram 提醒；") }}<b>{{ _("不建购物车、不碰 OVH 账号") }}</b></span>
+      {% if not TG_OK %}<span class="cwarn" id="tgwarn" {% if pm!="notify" %}hidden{% endif %} role="alert">{{ ic("warning") }}<span>{{ TG_WHY }}{{ _("。「仅提醒」需要 Telegram 才能提醒你，") }}<a href="/notify" target="_blank" rel="noopener">{{ _("去配置通知") }} {{ ic("arrow-right") }}</a></span></span>{% endif %}</label>
+    <label class="choice c-dry"><input type="radio" class="vh" name="pay_mode" value="dry" {% if pm=="dry" %}checked{% endif %}><span class="rd"></span>
+      <b>{{ ic("eye") }} {{ _("只预览") }} <span class="tag cyan">{{ _("推荐先用") }}</span></b>
+      <span class="d">{{ _("只监控库存；有密钥时建购物车读取首期价格后删除，") }}<b>{{ _("绝不结账") }}</b></span></label>
+    <label class="choice c-order"><input type="radio" class="vh" name="pay_mode" value="order" {% if pm=="order" %}checked{% endif %}><span class="rd"></span>
+      <b>{{ ic("file-text") }} {{ _("只下单不付款") }}</b>
+      <span class="d">{{ _("有货立即提交订单（不扣款），订单和付款链接出现在订单记录，你到 OVH 手动付款；未付款订单到期会失效（有效期见订单记录），付款前库存不保证保留") }}</span></label>
+    <label class="choice c-pay"><input type="radio" class="vh" name="pay_mode" value="pay" {% if pm=="pay" %}checked{% endif %}><span class="rd"></span>
+      <b>{{ ic("credit-card") }} {{ _("下单并自动付款") }}</b>
+      <span class="d">{{ _("提交订单并用 OVH 账号的默认支付方式立即扣款，最快锁定机器") }}</span></label>
+  </div>
+  <div class="optgrid">
+    <label class="optcard" id="prebuildcard"><input type="checkbox" class="vh" role="switch" name="prebuild" id="prebuild" {% if t.prebuild and pm in ("order","pay") %}checked{% endif %}><div class="tx"><b>{{ ic("thunderbolt") }} {{ _("快速通道") }}</b><span>{{ _("提前建好购物车，有货直接结账（省 1-3 秒）；需要该型号同时指定内存和硬盘，只预览模式下不生效") }}</span></div><span class="tr"></span></label>
+    <label class="optcard plain" id="cooldowncard" {% if pm!="notify" %}hidden{% endif %}><div class="tx"><b>{{ ic("clock-circle") }} {{ _("提醒冷却（分钟）") }}</b><span>{{ _("同一型号补货时立刻提醒；售罄后再补货会再次提醒，但两次提醒至少间隔这么久（0 = 不限）") }}</span></div><input type="number" name="alert_cooldown" min="0" max="1440" step="1" value="{{ t.alert_cooldown if t.alert_cooldown is not none else 10 }}" aria-label="{{ _("提醒冷却（分钟）") }}"></label>
+  </div>
+  <div class="warn small" id="realwarn" style="display:none;margin-top:10px">{{ ic("warning") }} <span id="realwarn_t"></span></div>
+  <p class="muted small" style="margin:10px 0 0">{{ _("「最多下单数」统计所有真实提交的订单，包括未付款的订单。") }}</p>
+</div>
+
+<div class="card">
+  <h2><span class="step">4</span> {{ _("费用预估") }} <span class="muted small" id="pricehint">{{ _("按所选型号、配置、计费方式和子公司实时计算") }}</span></h2>
+  <div id="pricebox" class="pricebox"><div class="empty">{{ ic("euro") }}{{ _("选择型号后显示月付单价、安装费、税费和首期合计") }}</div></div>
+  <div class="fxline" id="fxline"></div>
+</div>
+<div class="row"><button class="primary">{{ _("保存任务") }}</button><a class="btn" href="{{ '/' if is_new else '/tasks/%d'|format(t.id) }}">{{ _("取消") }}</a></div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ csp_nonce }}" src="/static/stocktable.js?v=1"></script>
+<script nonce="{{ csp_nonce }}">
+const DCL = {{ DC_LABEL|tojson }};
+const INIT = {plans: {{ plans|tojson }}, extras: {{ (t.extra_addons or "")|tojson }}.split(',').filter(Boolean)};
+const $ = id => document.getElementById(id);
+let details = {}, currency = '€';
+const SEL = new TaskSelection(INIT.plans, () => { sb.render(); tray.render(); schedulePrice(); });
+const sb = new StockBrowser({select: true, storageKey: 'ovhsn.taskpick.v1', subs: {{ SUBSIDIARIES|tojson }}, mine: {{ (mine or [])|tojson }},
+  selection: SEL, keepContext: true, fxId: 'stockfx', initialPlans: INIT.plans,
+  onCatalog: (d, err) => { if (!d) { $('catinfo').textContent = T('目录加载失败: ') + ((err && err.error) || ''); return; }
+    currency = d.currency === 'EUR' ? '€' : d.currency + ' '; details = {};
+    $('catinfo').textContent = T('· 共 {0} 个型号（{1}，价格不含税）', d.count, d.currency); tray.render(); },
+  onContext: () => { autoVat(); details = {}; tray.render(); schedulePrice(); }});
+async function detail(p){
+  const k = p.type + ':' + p.planCode; if (k in details) return details[k];
+  details[k] = (async () => { const r = await fetch('/api/plan?'+new URLSearchParams({endpoint:$('endpoint').value, subsidiary:$('subsidiary').value, type:p.type, plan:p.planCode})); return r.ok ? r.json() : null; })();
+  return details[k];
+}
+const tray = new SelectionTray($('tray'), SEL, detail, DCL, renderExtras);
+async function renderExtras(){
+  const ex = $('extras'), items = SEL.items;
+  const d = items.length === 1 ? await detail(items[0]) : null;
+  if (d) {
+    const extra = Object.entries(d.families).filter(([k,v])=>!v.mandatory && !['memory','storage','bandwidth'].includes(k));
+    const keep = new Set([...document.querySelectorAll('input[name=extra_addons]:checked')].map(x => x.value).concat(INIT.extras));
+    ex.style.display = extra.length ? '' : 'none';
+    $('extralist').innerHTML = extra.map(([k,v])=>v.items.map(i=>`<label class="check"><input type="checkbox" name="extra_addons" value="${esc(i.code)}" ${keep.has(i.code)?'checked':''}> ${esc(k)}: ${esc(i.label)}</label>`).join('')).join('');
+  } else { ex.style.display = 'none'; $('extralist').innerHTML = ''; }
+  $('extralist').querySelectorAll('input').forEach(x => x.onchange = () => { INIT.extras = []; schedulePrice(); });
+}
+$('tf').addEventListener('submit', e => {
+  if (payMode() === 'notify' && !TG_OK) { e.preventDefault(); const w = $('tgwarn'); w.hidden = false; w.classList.remove('shake'); void w.offsetWidth; w.classList.add('shake'); w.scrollIntoView({block: 'center', behavior: 'smooth'}); return; }
+  if (!SEL.items.length){ e.preventDefault(); alert(T('请至少选择一个型号')); $('selcard').scrollIntoView({block: 'center', behavior: 'smooth'}); return; }
+  $('plans_json').value = JSON.stringify(SEL.payload());
+});
+const WARN = {order: T('「只下单不付款」：有货会真实提交订单（不扣款），请留意通知并及时到 OVH 付款；建议设置首期上限。'),
+              pay: T('「下单并自动付款」：有货会真实下单并立即扣款。建议先设置首期上限，并先用「只预览」跑通。')};
+const TG_OK = {{ TG_OK|tojson }};
+const payMode = () => (document.querySelector('input[name=pay_mode]:checked') || {}).value || 'dry';
+const dr = () => { const m = payMode(), n = m === 'notify', real = m === 'order' || m === 'pay';
+  $('realwarn').style.display = real ? 'flex' : 'none'; $('realwarn_t').textContent = WARN[m] || '';
+  // 快速通道 only matters for real orders; hide + uncheck it for notify-only, disable it for preview
+  $('prebuildcard').hidden = n; $('prebuild').disabled = !real; if (!real) $('prebuild').checked = false;
+  $('prebuildcard').classList.toggle('off', !real && !n);
+  $('cooldowncard').hidden = !n;
+  if ($('tgwarn')) $('tgwarn').hidden = !n;
+};
+document.querySelectorAll('input[name=pay_mode]').forEach(r => r.addEventListener('change', dr)); dr();
+const VAT = {{ VAT_TABLE|tojson }};
+let vatTouched = false; $('vat_rate').addEventListener('input', () => vatTouched = true);
+function autoVat(){ if (!vatTouched) $('vat_rate').value = VAT[$('subsidiary').value.toUpperCase()] || 1; }
+$('pricing_mode').addEventListener('change', () => { const m = $('pricing_mode').value, d = document.querySelector('select[name=duration]');
+  if (m === 'upfront12') d.value = 'P12M'; else if (m === 'upfront24') d.value = 'P24M'; else if (m === 'default' && /P(12|24)M/.test(d.value)) d.value = 'P1M'; schedulePrice(); });
+document.querySelector('select[name=duration]').addEventListener('change', schedulePrice);
+document.querySelector('input[name=price_cap]').addEventListener('input', schedulePrice);
+let priceTimer = null, priceSeq = 0;
+function schedulePrice(){ clearTimeout(priceTimer); priceTimer = setTimeout(loadPrice, 250); }
+const money = (sym, v) => v == null ? '–' : esc(sym) + Number(v).toFixed(2);
+async function loadPrice(){
+  const sel = SEL.items.map(s => ({...s, label: s.label || s.name})), box = $('pricebox');
+  if (!sel.length){ box.innerHTML = `<div class="empty">${ICON("euro")}${T('选择型号后显示月付单价、安装费、税费和首期合计')}</div>`; $('fxline').innerHTML = ''; return; }
+  const seq = ++priceSeq;
+  const extras = [...document.querySelectorAll('input[name=extra_addons]:checked')].map(x => x.value).join(',');
+  const qs = new URLSearchParams({endpoint: $('endpoint').value, subsidiary: $('subsidiary').value, duration: document.querySelector('select[name=duration]').value,
+    pricing_mode: $('pricing_mode').value, extras, plans: JSON.stringify(sel.map(s => ({planCode: s.planCode, type: s.type, memory: s.memory || '', storage: s.storage || '', bandwidth: s.bandwidth || ''})))});
+  let d; try { const r = await fetch('/api/price?' + qs); d = await r.json(); if (!r.ok) throw 0; } catch (e) { if (seq === priceSeq) box.innerHTML = `<div class="empty">${T('价格计算失败，稍后重试')}</div>`; return; }
+  if (seq !== priceSeq) return;
+  const fx = d.fx || {}, rate = fx.base !== 'CNY' ? fx.rate : null, cap = parseFloat(document.querySelector('input[name=price_cap]').value);
+  const cny = v => rate && v != null ? `<span class="cny">${yuan(v * rate)}</span>` : '';
+  const vatPct = Math.round((d.vatRate - 1) * 1000) / 10;
+  $('capcny').textContent = rate && !isNaN(cap) ? yuan(cap * rate) : '';
+  box.innerHTML = `<div class="tablewrap"><table class="t"><thead><tr><th>${T('型号')}</th><th class="num">${T('月付单价')}</th><th class="num">${T('安装 / 配置费')}</th><th class="num">${d.plans[0] && d.plans[0].months > 1 ? T('首期租金') : T('首月租金')}</th><th class="num">${T('税费')} ${vatPct ? vatPct + '%' : T('（不含税）')}</th><th class="num">${T('首期合计')}</th></tr></thead><tbody>` +
+    d.plans.map((p, i) => p.error ? `<tr><td><code>${esc(p.planCode)}</code></td><td colspan="5" class="muted">${esc(p.error)}</td></tr>` : `<tr>
+      <td class="name"><b>${sel.length > 1 ? `<span class="tag accent">${i + 1}</span> ` : ''}${esc(p.name)}</b><small class="items">${p.items.map(it => esc(it.label) + (it.rent || it.setup ? ` +${money(p.symbol, it.rent)}${it.setup ? T(' / 安装 ') + money(p.symbol, it.setup) : ''}` : '')).join(' · ')}</small></td>
+      <td class="num price">${money(p.symbol, p.monthly)}${cny(p.monthly)}</td>
+      <td class="num">${money(p.symbol, p.setup)}${cny(p.setup)}</td>
+      <td class="num">${money(p.symbol, p.period)}${cny(p.period)}${p.months > 1 ? `<span class="cny">${T('共 {0} 个月', p.months)}</span>` : ''}</td>
+      <td class="num">${money(p.symbol, p.tax)}${cny(p.tax)}</td>
+      <td class="num total">${money(p.symbol, p.total)}${cny(p.total)}${!isNaN(cap) && p.total > cap ? ` <span class="tag red">${T('超过上限')}</span>` : ''}</td></tr>`).join('') + `</tbody></table></div>` +
+    (sel.length > 1 ? `<p class="muted small" style="margin:8px 0 0">${T('多型号任务按优先级只买其中一个，每行是该型号单独下单时的首期金额。')}</p>` : '');
+  $('fxline').innerHTML = rate ? `${ICON('swap')}${T('人民币按 1 {0} = {1} CNY 换算 · 来源 {2}{3}{4} · 实际金额以 OVH 购物车为准', esc(fx.base), rate.toFixed(4), esc(fx.source), fx.fetchedIso ? T(' · 获取于 ') + fmtLocal(fx.fetchedIso) : '', fx.live ? '' : T('（汇率接口暂不可用，为估算值）'))}` : '';
+}
+{% if is_new %}autoVat();{% endif %} sb.loadCatalog(); sb.load(); tray.render(); schedulePrice();
+</script>
+{% endblock %}

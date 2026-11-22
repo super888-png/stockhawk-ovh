@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("账号与安全") }}{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>{{ _("账号与安全") }}</h1><p>{{ _("修改密码、退出所有设备、查看最近的账号活动") }}</p></div></div>
+<div class="grid2">
+  <div class="card">
+    <h2>{{ ic("lock") }} {{ _("修改密码") }}</h2>
+    <form method="post" action="/account/password">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="text" name="username" value="{{ user.username }}" autocomplete="username" hidden>
+      <label>{{ _("当前密码") }}<input name="old" type="password" required autocomplete="current-password"></label>
+      <label style="margin-top:12px">{{ _("新密码") }} <span class="hint">{{ _("至少 10 位，含字母/数字/符号中的两类") }}</span><input name="new" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label>
+      <label style="margin-top:12px">{{ _("确认新密码") }}<input name="new2" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label>
+      <div class="row" style="margin-top:14px"><button class="primary">{{ _("修改密码") }}</button><span class="muted small">{{ _("修改后其他设备上的登录会全部失效") }}</span></div>
+    </form>
+  </div>
+  <div class="card">
+    <h2>{{ ic("safety-certificate") }} {{ _("登录状态") }}</h2>
+    <dl class="kv">
+      <dt>{{ _("用户名") }}</dt><dd>{{ user.username }} {% if user.is_admin %}<span class="tag accent">{{ _("管理员") }}</span>{% endif %}</dd>
+      <dt>{{ _("上次登录") }}</dt><dd>{{ user.last_login_at|lt }} <span class="muted mono small">{{ user.last_login_ip }}</span></dd>
+      <dt>{{ _("会话有效期") }}</dt><dd>{{ _("最长 14 天，3 天无操作自动退出") }}</dd>
+    </dl>
+    <form method="post" action="/account/logout-all" style="margin-top:14px"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" data-confirm="{{ _("退出所有设备（包括当前浏览器）？") }}">{{ ic("poweroff") }} {{ _("退出所有设备") }}</button></form>
+    <p class="muted small" style="margin:12px 0 0">{{ _("怀疑密码泄露时：先修改密码，再到「OVH 密钥」页删除并在 OVH 控制台撤销对应的 API 令牌。") }}</p>
+  </div>
+</div>
+<div class="card">
+  <h2>{{ ic("history") }} {{ _("最近活动") }} <span class="muted small">{{ _("最近 50 条") }}</span></h2>
+  <div class="tablewrap">{% if not logs %}<div class="empty">{{ ic("history") }}{{ _("暂无记录") }}</div>{% else %}
+  <table class="t"><thead><tr><th>{{ _("时间") }}</th><th>{{ _("操作") }}</th><th>{{ _("详情") }}</th><th>IP</th></tr></thead>
+  <tbody>{% for a in logs %}<tr><td class="mono small">{{ a.ts|lt }}</td>
+  <td>{% if a.action in ("login_fail", "password_fail") %}<span class="tag amber">{{ ACTION_CN.get(a.action, a.action) }}</span>{% else %}{{ ACTION_CN.get(a.action, a.action) }}{% endif %}</td>
+  <td class="small wrap">{{ a.detail }}</td><td class="mono small muted">{{ a.ip }}</td></tr>{% endfor %}</tbody></table>{% endif %}</div>
+</div>
+{% endblock %}

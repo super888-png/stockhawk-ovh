@@ -1,0 +1,99 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("任务 #") }}{{ t.id }}{% endblock %}
+{% block content %}
+{% include "_running.html" %}
+<div class="pagehead">
+  <div><h1>#{{ t.id }} {{ t.name or t.plan_label or t.plan_code }}</h1>
+  <p><span id="st" class="st st-{{ t.status }}">{{ STATUS_CN.get(t.status, t.status) }}</span> <span id="sttext" class="muted">{{ t.status_text }}</span> {{ _("· 已轮询") }} <b id="polls">{{ live.polls if live else t.polls }}</b> {{ _("次") }}</p></div>
+  <div class="row">
+    {% if live %}
+    <form method="post" action="/tasks/{{ t.id }}/stop" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ ic("pause-circle") }} {{ _("停止") }}</button></form>
+    {% else %}
+    <form method="post" action="/tasks/{{ t.id }}/start" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="primary" {% if t.notify_only and not TG_OK %}disabled title="{{ TG_WHY }}"{% endif %} {% if not t.dry_run %}data-confirm="{{ _("这是真实下单任务（{0}），有货会{1}。确定启动？", PAY_MODE_CN['pay' if t.auto_pay else 'order'], _('下单并自动扣款') if t.auto_pay else _('提交订单（不扣款）')) }}"{% endif %}>{{ ic("play-circle") }} {{ _("启动") }}</button></form>
+    <a class="btn" href="/tasks/{{ t.id }}/edit">{{ ic("edit") }} {{ _("编辑") }}</a>
+    <form method="post" action="/tasks/{{ t.id }}/clone" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button title="{{ _("复制为新任务") }}">{{ ic("copy") }} {{ _("复制") }}</button></form>
+    <form method="post" action="/tasks/{{ t.id }}/delete" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger" data-confirm="{{ _("删除任务和日志？") }}">{{ ic("delete") }} {{ _("删除") }}</button></form>
+    {% endif %}
+  </div>
+</div>
+{% if t.notify_only and not TG_OK %}<div class="warn" role="alert" style="margin-bottom:14px">{{ ic("warning") }} <span>{{ TG_WHY }}{{ _("。「仅提醒」任务只通过 Telegram 提醒你，配置好之前不能启动。") }} <a href="/notify">{{ _("去配置通知") }}</a></span></div>{% endif %}
+<div class="stats">
+  <div class="stat"><div class="k">{{ _("区域") }}</div><div class="v" style="font-size:18px">{{ t.endpoint }}</div><div class="d">{{ _("子公司") }} {{ t.subsidiary }}</div></div>
+  <div class="stat"><div class="k">{{ _("机房优先级") }}</div><div class="v" style="font-size:18px">{% set dcsets = plans|map(attribute='dcL')|unique|list %}{{ _("按型号分别设置") if dcsets|length > 1 else (t.datacenters.replace(',', ' → ') if t.datacenters else _("任意")) }}</div><div class="d">{{ _("允许非基础配置") if t.any_config else _("仅基础配置（未指定时）") }}</div></div>
+  {% set pm = t.pay_mode %}<div class="stat"><div class="k">{{ _("下单方式") }}</div><div class="v" style="font-size:18px">{{ PAY_MODE_CN[pm] }}</div><div class="d">{{ (_("只发 Telegram 提醒 · 冷却 {0} 分钟", t.alert_cooldown or 0)) if pm == "notify" else (_("不会结账") if pm == "dry" else (_("立即扣款") if pm == "pay" else _("需到 OVH 手动付款"))) }}{{ _(" · 快速通道") if t.prebuild and pm in ("order", "pay") }}</div></div>
+  <div class="stat"><div class="k">{{ _("下单进度") }}</div><div class="v">{{ t.orders_done }}/{{ t.max_orders }}</div><div class="d">{{ _("每单 {0} 台 · 上限 {1} · 间隔 {2}s", t.quantity, t.price_cap if t.price_cap is not none else _("不限"), t.poll_interval) }}</div></div>
+</div>
+<div class="card">
+  <h2>{{ _("监控型号（按优先级）") }}</h2>
+  <div class="tablewrap"><table class="t"><thead><tr><th>#</th><th>{{ _("型号") }}</th><th>{{ _("内存") }}</th><th>{{ _("硬盘") }}</th><th>{{ _("带宽") }}</th><th>{{ _("机房（优先级）") }}</th></tr></thead><tbody>
+  {% for p in plans %}<tr><td class="muted" style="font-variant-numeric:tabular-nums">{{ loop.index }}</td>
+    <td class="name"><b>{{ p.name }}</b> <code class="pc">{{ p.planCode }}</code>{% if p.cpu %}<small>{{ p.cpu }}{% if p.cores %} · {{ p.cores }}{% endif %}</small>{% endif %}</td>
+    <td class="small"{% if p.memory %} title="{{ p.memory }}"{% endif %}>{{ p.memL or _("任意") }}</td>
+    <td class="small"{% if p.storage %} title="{{ p.storage }}"{% endif %}>{{ p.stoL or _("任意") }}</td>
+    <td class="small"{% if p.bandwidth %} title="{{ p.bandwidth }}"{% endif %}>{{ p.bwL or _("目录默认") }}</td>
+    <td class="small wrap">{{ p.dcL or _("任意") }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</div>
+<div class="card">
+  <div class="row between"><h2>{{ _("实时库存（本任务型号）") }}</h2><div class="livebar"><span class="dot off" id="dot"></span><span id="prebuilt"></span></div></div>
+  <div class="tablewrap"><table class="t"><thead><tr><th>{{ _("型号") }}</th><th>{{ _("内存") }}</th><th>{{ _("硬盘") }}</th><th>{{ _("有货机房") }}</th></tr></thead><tbody id="stock"><tr><td colspan="4" class="empty">{{ _("等待数据…") }}</td></tr></tbody></table></div>
+</div>
+<div class="card">
+  <div class="row between"><h2>{{ _("实时日志") }} <span id="livepoll" class="livepoll off">{{ _("连接中…") }}</span></h2><label class="toggle"><input type="checkbox" class="vh" role="switch" id="autoscroll" checked><span class="tr"></span>{{ _("自动滚动") }}</label></div>
+  <pre id="log" class="log"></pre>
+</div>
+<div class="card"><h2>{{ _("订单 / 预览记录") }}</h2>{% include "_orders_table.html" %}</div>
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+const TID = {{ t.id }}, DCL = {{ DC_LABEL|tojson }}, WAS_RUNNING = {{ 'true' if live else 'false' }};
+let after = 0, es = null, sseFails = 0, pollTimer = null, busy = false, lastState = null;
+const logEl = document.getElementById('log'), $id = x => document.getElementById(x);
+function apply(d){
+  lastState = d;
+  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+  let added = 0, html = '';
+  for (const l of d.logs || []) {
+    if (l.id <= after) continue;           // de-dupe (reconnects / overlapping polls)
+    after = l.id; added++;
+    html += `<span class="m m-${esc(l.marker)}">${l.iso ? fmtLocal(l.iso) : esc(l.ts)} ${esc(l.marker)}</span> ${esc(l.msg)}\n`;
+  }
+  if (added) {
+    logEl.insertAdjacentHTML('beforeend', html);
+    if ($id('autoscroll').checked && (atBottom || added === (d.logs || []).length)) logEl.scrollTop = logEl.scrollHeight;
+  }
+  const st = $id('st'); st.textContent = d.status_cn; st.className = 'st st-' + d.status;
+  $id('sttext').textContent = d.status_text; $id('polls').textContent = d.polls;
+  $id('dot').className = d.running ? 'dot' : 'dot off';
+  $id('prebuilt').textContent = d.running ? (d.prebuilt && d.prebuilt !== '-' ? T('预建购物车 ') + d.prebuilt : T('实时')) : T('任务未运行');
+  const s = $id('stock');
+  if (!d.running) s.innerHTML = `<tr><td colspan="4" class="empty">${ICON('pause-circle')}${T('任务未运行')}</td></tr>`;
+  else if (!d.stock.length) s.innerHTML = `<tr><td colspan="4" class="empty">${ICON('search')}${T('当前无货，持续监控中')}</td></tr>`;
+  else s.innerHTML = d.stock.map(x=>`<tr><td class="name"><b>${esc(x.label||x.plan)}</b> <code class="pc">${esc(x.plan||'')}</code></td><td class="small" title="${esc(x.memory)}">${esc(x.ramL||x.memory)}</td>
+    <td class="small" title="${esc(x.storage)}">${x.default?`<span class="tag green">${T('基础')}</span> `:''}${esc(x.diskL||x.storage)}</td><td class="wrap">${x.dcs.map(p=>`<span style="margin-right:8px;white-space:nowrap">${esc(DCL[p[0]]||p[0])} ${avBadge(p[1])}</span>`).join('')}</td></tr>`).join('');
+  d._recv = Date.now(); tick();
+  if (d.running !== WAS_RUNNING) setTimeout(() => location.reload(), 800);   // started/stopped/finished elsewhere
+}
+function tick(){   // "第 N 次轮询 · 3 秒前" without waiting for the next message
+  const d = lastState, el = $id('livepoll'); if (!d || !el) return;
+  if (!d.running) { el.textContent = T('任务未运行'); el.className = 'livepoll off'; return; }
+  const age = d.lastPoll ? Math.max(0, Math.round(d.now - d.lastPoll + (Date.now() - d._recv) / 1000)) : null;
+  el.className = 'livepoll' + (d.in_stock ? ' hit' : '');
+  el.textContent = `${es && es.readyState === 1 ? T('实时推送') : T('轮询更新')} ${T('· 第 {0} 次轮询', d.polls)}` + (age != null ? ` ${T('· {0} 秒前', age)}` : '') +
+    (d.lastMs ? ` ${T('· 耗时 {0}ms', d.lastMs)}` : '') + (d.in_stock ? T(' · 有匹配库存') : T(' · 无匹配库存')) + (d.feedError ? T(' · 查询出错') : '');
+}
+async function poll(){
+  if (busy || document.hidden) return; busy = true;
+  try { const r = await fetch(`/api/tasks/${TID}/logs?after=${after}`); if (r.ok) apply(await r.json()); } catch (e) {} finally { busy = false; }
+}
+function startPolling(){ if (!pollTimer) { poll(); pollTimer = setInterval(poll, 1500); } }
+function startSSE(){
+  if (!window.EventSource) return startPolling();
+  es = new EventSource(`/api/tasks/${TID}/stream?after=${after}`);
+  es.onmessage = e => { sseFails = 0; try { apply(JSON.parse(e.data)); } catch (_) {} };
+  es.addEventListener('gone', () => { es.close(); });
+  es.onerror = () => { if (++sseFails >= 3) { es.close(); es = null; startPolling(); } };   // proxy that buffers SSE -> poll
+}
+poll().then(startSSE); setInterval(tick, 1000);
+</script>
+{% endblock %}

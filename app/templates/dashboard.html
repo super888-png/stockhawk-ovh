@@ -1,0 +1,115 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("控制台") }}{% endblock %}
+{% block content %}
+{% include "_running.html" %}
+<div class="pagehead">
+  <div><h1>{{ _("控制台") }}</h1><p>{{ _("你好，{0}。任务在服务器后台 7×24 运行，关掉浏览器也不影响。", user.username) }}</p></div>
+  <div class="row"><a class="btn" href="/stock">{{ _("实时库存") }}</a><a class="btn primary" href="/tasks/new">{{ ic("plus") }} {{ _("新建抢购任务") }}</a></div>
+</div>
+{% if not creds %}<div class="flash warn">{{ ic("key") }}<div>{{ _("还没有可用的 OVH 密钥。DRY-RUN 任务可以先跑（只监控库存）；真实下单前请到") }} <a href="/keys">{{ _("OVH 密钥") }}</a> {{ _("页按指引获取（约 2 分钟）。") }}</div></div>{% endif %}
+<div class="stats">
+  <div class="stat"><div class="k">{{ _("运行中任务") }}</div><div class="v" id="s-run">{{ stats.running }}</div><div class="d">{{ _("共 {0} 个任务", stats.total) }}</div></div>
+  <div class="stat"><div class="k">{{ _("匹配到有货") }}</div><div class="v" id="s-hit">{{ stats.hits }}</div><div class="d">{{ _("任务条件内的现货") }}</div></div>
+  <div class="stat"><div class="k">{{ _("已下单") }}</div><div class="v">{{ stats.orders }}</div><div class="d">{{ _("预览 {0} 次", stats.previews) }}</div></div>
+  <div class="stat"><div class="k">{{ _("共享轮询") }}</div><div class="v">{{ stats.feeds }}</div><div class="d">{{ _("累计请求") }} {{ stats.requests }}</div></div>
+</div>
+
+<div class="card" id="dcmap">
+  <div class="row between"><h2>{{ ic("global") }} {{ _("全球机房库存") }}</h2><div class="livebar"><span class="dot off" id="mdot"></span><span id="mscope" class="dcm-scope"></span><span id="mtime">{{ _("加载中…") }}</span></div></div>
+  <div class="dcmap">
+    <div class="dcm-panel dcm-world"><svg id="dcm-world" role="group" aria-label="{{ _("全球 OVH 机房库存地图") }}" preserveAspectRatio="xMidYMid meet"></svg><span class="dcm-cap">WORLD · MILLER</span></div>
+    <div class="dcm-panel dcm-eu"><svg id="dcm-eu" role="group" aria-label="{{ _("欧洲机房放大图") }}" preserveAspectRatio="xMidYMid meet"></svg><span class="dcm-cap">EUROPE</span></div>
+    <div class="dcm-tip" id="dcm-tip" role="tooltip" hidden></div>
+  </div>
+  <div class="dcm-foot"><div class="dcm-legend" id="dcm-legend"></div><span class="muted small">{{ _("颜色取该机房内最好的库存状态 · 点机房看各型号详情") }}</span></div>
+  <div class="dcm-list" id="dcm-list"></div>
+</div>
+
+<div class="card">
+  <div class="row between"><h2>{{ _("我的抢购任务") }}</h2></div>
+  {% if not tasks %}
+  <ol class="onboard">
+    <li class="{{ 'done' if creds }}"><span class="n">{{ ic("check") if creds else "1" }}</span><div><b>{{ _("保存 OVH 密钥") }}</b><span>{{ _("约 2 分钟，按指引一键创建令牌；只预览任务可以先不填") }}</span></div><a class="btn sm" href="/keys">{{ _("去设置") }}</a></li>
+    <li class="{{ 'done' if has_notify }}"><span class="n">{{ ic("check") if has_notify else "2" }}</span><div><b>{{ _("配置通知") }}</b><span>{{ _("Telegram / Webhook，有货、下单、付款、交付分类推送") }}</span></div><a class="btn sm" href="/notify">{{ _("去设置") }}</a></li>
+    <li><span class="n">3</span><div><b>{{ _("新建抢购任务") }}</b><span>{{ _("可多选型号（Rise / Advance 混选），先用「只预览」跑通再改成真实下单") }}</span></div><a class="btn sm primary" href="/tasks/new">{{ _("新建任务") }}</a></li>
+  </ol>{% else %}
+  <div class="tablewrap"><table class="t">
+  <thead><tr><th>#</th><th>{{ _("任务 / 型号") }}</th><th>{{ _("区域") }}</th><th>{{ _("机房") }}</th><th>{{ _("模式") }}</th><th>{{ _("状态") }}</th><th class="num">{{ _("轮询") }}</th><th class="num">{{ _("已下单") }}</th><th></th></tr></thead>
+  <tbody>
+  {% for v in tasks %}{% set t = v.t %}
+  <tr data-tid="{{ t.id }}">
+    <td class="muted">{{ t.id }}</td>
+    <td class="name"><a href="/tasks/{{ t.id }}"><b>{{ t.name or (v.plans|map(attribute='name')|select|join(' / ')) or t.plan_code }}</b></a>
+      <div class="row" style="gap:4px;margin-top:4px">{% for p in v.plans %}<span class="tag {{ 'accent' if loop.first else '' }}" title="{{ p.planCode }}{% if p.cpu %} · {{ p.cpu }}{% endif %}{% if p.memL %} · {{ p.memL }}{% endif %}{% if p.stoL %} · {{ p.stoL }}{% endif %}{% if p.dcL %} · {{ p.dcL }}{% endif %}">{{ loop.index }} · {{ p.name }}</span>{% endfor %}</div></td>
+    <td class="small">{{ t.endpoint }}<br><span class="muted">{{ t.subsidiary }}</span></td>
+    <td class="small">{% if v.plans|map(attribute='dcL')|unique|list|length > 1 %}{{ _("按型号分别设置") }}{% else %}{{ t.datacenters or _("全部") }}{% endif %}</td>
+    <td>{% if t.notify_only %}<span class="tag green">{{ _("仅提醒") }}</span>{% elif t.dry_run %}<span class="tag cyan">{{ _("只预览") }}</span>{% elif t.auto_pay %}<span class="tag red">{{ _("下单并付款") }}</span>{% else %}<span class="tag amber">{{ _("只下单") }}</span>{% endif %}</td>
+    <td class="wrap" style="min-width:150px"><span class="st st-{{ t.status }}" data-f="status">{{ STATUS_CN.get(t.status, t.status) }}</span><br><small class="muted" data-f="text">{{ t.status_text }}</small></td>
+    <td class="num" data-f="polls">{{ v.live.polls if v.live else t.polls }}</td>
+    <td class="num">{{ t.orders_done }}/{{ t.max_orders }}</td>
+    <td class="actions"><div class="row">
+      {% if v.running %}
+      <form method="post" action="/tasks/{{ t.id }}/stop" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="/"><button class="sm">{{ ic("pause-circle") }} {{ _("停止") }}</button></form>
+      {% else %}
+      <form method="post" action="/tasks/{{ t.id }}/start" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sm" {% if not t.dry_run %}data-confirm="{{ _("任务 #{0} 是真实下单任务（{1}），确定启动？", t.id, _('下单并自动付款') if t.auto_pay else _('只下单不付款')) }}"{% endif %}>{{ ic("play-circle") }} {{ _("启动") }}</button></form>
+      <a class="btn sm icon" href="/tasks/{{ t.id }}/edit" title="{{ _("编辑") }}" aria-label="{{ _("编辑") }}">{{ ic("edit") }}</a>
+      <form method="post" action="/tasks/{{ t.id }}/clone" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sm icon" title="{{ _("复制任务") }}" aria-label="{{ _("复制任务") }}">{{ ic("copy") }}</button></form>
+      {% endif %}
+      <a class="btn sm" href="/tasks/{{ t.id }}">{{ _("日志") }}</a>
+    </div></td>
+  </tr>{% endfor %}
+  </tbody></table></div>{% endif %}
+</div>
+
+<div class="card">
+  <div class="row between"><h2>{{ _("任务型号实时现货") }}</h2><div class="livebar"><span class="dot" id="wdot"></span><span id="wtime">{{ _("加载中…") }}</span><a href="/stock" class="btn sm ghost">{{ _("完整列表") }} {{ ic("arrow-right") }}</a></div></div>
+  <div class="tablewrap"><table class="t"><thead><tr><th>{{ _("型号") }}</th><th>{{ _("机房") }}</th><th>{{ _("配置") }}</th><th>{{ _("库存") }}</th><th class="num">{{ _("月费") }} <span class="hint">{{ _("不含税") }}</span></th></tr></thead><tbody id="wbody"><tr><td colspan="5" class="empty">{{ _("加载中…") }}</td></tr></tbody></table></div>
+</div>
+
+<div class="card" id="myservers">
+  <div class="row between"><h2>{{ ic("cloud-server") }} {{ _("我的服务器") }}</h2>
+  {% if account_eps %}<div class="row"><span class="muted small" id="acctAge"></span><button class="sm" id="acctRefresh" type="button">{{ ic("reload") }} {{ _("刷新") }}</button></div>{% endif %}</div>
+  {% if not account_eps %}<div class="empty">{{ ic("key") }}{{ _("还没有可用的 OVH 密钥。") }}<a href="/keys">{{ _("保存并验证密钥") }}</a>{{ _("后，这里会显示账号里已有的独立服务器（状态、配置、IP、到期时间）。") }}</div>
+  {% else %}<div id="acct">{% for ep in account_eps %}
+  <section class="acct" data-ep="{{ ep }}">
+    <div class="acct-notice"></div>
+    {% if account_eps|length > 1 %}<div class="row between" style="margin:6px 0"><span class="tag gray">{{ ep }}</span><span class="muted small" data-slot="srv-count"></span></div>{% else %}<div class="muted small" data-slot="srv-count" style="margin:-4px 0 8px"></div>{% endif %}
+    <div class="srvgrid" data-slot="servers">
+      {% for i in range(2) %}<div class="srv sk-card"><div class="sk w40"></div><div class="sk w60"></div><div class="sk w90"></div><div class="sk w80"></div><div class="sk w70"></div></div>{% endfor %}
+    </div>
+  </section>{% endfor %}</div>{% endif %}
+</div>
+
+<div class="card"><h2>{{ _("最近订单 / 预览") }}</h2>{% include "_orders_table.html" %}</div>
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+async function refresh(){
+  try{
+    const r = await fetch('/api/tasks/status'); if(!r.ok) return; let run=0, hit=0;
+    for(const s of await r.json()){ if(s.running) run++; if(s.in_stock) hit++;
+      const tr = document.querySelector(`tr[data-tid="${s.id}"]`); if(!tr) continue;
+      const st = tr.querySelector('[data-f=status]'); st.textContent = s.status_cn + (s.in_stock?T(' · 有货'):''); st.className='st st-'+s.status;
+      tr.querySelector('[data-f=text]').textContent = s.status_text; tr.querySelector('[data-f=polls]').textContent = s.polls; }
+    document.getElementById('s-run').textContent = run; document.getElementById('s-hit').textContent = hit;
+  }catch(e){}
+}
+async function widget(){
+  try{
+    const r = await fetch('/api/stock/mine'); if(!r.ok) return; const d = await r.json(); const b = document.getElementById('wbody');
+    document.getElementById('wtime').textContent = T('更新于 ') + (d.nowTs ? fmtLocal(d.nowTs) : d.now);
+    if(!d.feeds.length){ b.innerHTML = `<tr><td colspan="5" class="empty">${T('还没有任务型号')}</td></tr>`; return; }
+    const loading = d.feeds.some(f=>f.loading);
+    b.innerHTML = d.rows.length ? d.rows.slice(0,12).map(x=>`<tr><td class="name"><b>${esc(x.name)}</b><small>${esc(x.plan)}</small></td><td>${esc(x.dcLabel)}</td>
+      <td class="small">${x.orderable===false?`<span class="tag amber" title="${esc(x.why)}">${T('不可下单')}</span> `:''}${x.default?`<span class="tag green">${T('基础')}</span> `:''}${esc(x.ram)} · ${esc(x.disk)}</td><td>${avBadge(x.availability)}</td>
+      <td class="num price">${x.price!=null?esc(x.currency)+x.price.toFixed(2):'–'}${x.cny?`<span class="cny">${esc(x.cny)}</span>`:''}</td></tr>`).join('') + (d.rows.length>12?`<tr><td colspan="5" class="muted small">${T('还有 {0} 条，', d.rows.length-12)}<a href="/stock">${T('查看全部')}</a></td></tr>`:'')
+      : `<tr><td colspan="5" class="empty">${loading?T('首次加载中…'):T('任务型号当前全部无货')}</td></tr>`;
+  }catch(e){}
+}
+refresh(); widget(); setInterval(refresh, 5000); setInterval(widget, 10000);
+</script>
+{% if account_eps %}<script nonce="{{ csp_nonce }}">
+window.ACCT = {appOrders: {}, guide: {{ guide|tojson }}, tz: {{ TZNAME|tojson }}, want: ["servers"]};
+</script>
+<script nonce="{{ csp_nonce }}" src="/static/account.js?v=8"></script>{% endif %}
+<script nonce="{{ csp_nonce }}" src="/static/dcmap.js?v=2"></script>
+{% endblock %}

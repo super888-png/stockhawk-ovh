@@ -1,0 +1,58 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("OVH 密钥") }}{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>{{ _("OVH API 密钥") }}</h1><p>{{ _("按下面 3 步操作，约 2 分钟。密钥用服务器密钥 Fernet 加密保存，保存后只显示打码值，不会再返回明文。") }}</p></div></div>
+
+<div class="card">
+  <h2>{{ _("获取密钥指引") }}</h2>
+  <ol class="steps">
+    <li><b>{{ _("选对区域，点「一键创建令牌」。") }}</b>{{ _("按你 OVH 账号注册的站点选择下面对应区域（不确定就看账号后台网址：欧洲站选 ovh-eu，加拿大/亚太/国际站选 ovh-ca，美国站选 ovh-us）。按钮会打开 OVH 官方的 createToken 页面，") }}<b>{{ _("所需权限已自动填好") }}</b>{{ _("。") }}</li>
+    <li><b>{{ _("在 OVH 页面登录并填写：") }}</b>{{ _("用你") }}<b>{{ _("要下单的那个 OVH 账号") }}</b>{{ _("登录（ovh-eu / ovh-ca 会先跳到 OVH 登录页，登录后自动回到创建页面；ovh-us 是在同一页填账号密码）→\n      名称（") }}<code>Application name</code> / <code>Script name</code>{{ _("）随便填，如") }} <code>sniper</code> {{ _("→ 描述随便填 →") }}
+      <code>Validity</code> {{ _("选") }} <b>Unlimited</b>{{ _("（否则到期要重新获取）→ 确认 Rights 已有 {0} 行：", rules|length) }}
+      {% for r in rules %}<code>{{ r.method }} {{ r.path }}</code>{{ _("、") if not loop.last }}{% endfor %} {{ _("→ 点") }} <b>Create keys</b>{{ _("。") }}</li>
+    <li><b>{{ _("复制 3 个值到本页对应输入框：") }}</b>{{ _("OVH 页面会显示") }} <code>Application Key</code> {{ _("→ 填「Application Key」；") }}<code>Application Secret</code> {{ _("→ 填「Application Secret」；") }}<code>Consumer Key</code> {{ _("→ 填「Consumer Key」。点") }} <b>{{ _("保存") }}</b>{{ _("，再点") }} <b>{{ _("验证") }}</b>{{ _("，看到账号名和默认支付方式即成功。注意：Application Secret 只显示一次，建议立刻复制。") }}</li>
+  </ol>
+  <div class="epcards">
+    {% for ep, g in guide.items() %}
+    <div class="ep">
+      <h4>{{ ep }} <span class="tag {{ 'green' if creds[ep] and creds[ep].verified_at else 'gray' }}">{{ g.name }}</span></h4>
+      <p>{{ g.who }}</p>
+      <a class="btn primary" href="{{ g.token }}" target="_blank" rel="noopener noreferrer">{{ _("一键创建令牌（推荐）") }}</a>
+      <a class="btn" href="{{ g.app }}" target="_blank" rel="noopener noreferrer">{{ _("只创建应用（createApp）") }}</a>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted small" style="margin:14px 0 0">{{ ic("safety-certificate") }} {{ _("权限只够读账号信息、建购物车下单、查订单和只读查看账号已有的独立服务器，不能删服务器、不能重装、不能改账号。随时可以在 OVH 控制台撤销。\n  另一种方式：只在 createApp 创建应用拿到 Key/Secret，填入后点「生成 Consumer Key」，本站会向 OVH 申请并给出授权链接。") }}</p>
+</div>
+
+{% if pending_url %}
+<div class="flash warn">{{ ic("link") }}<div>
+  <b>{{ pending_ep }}</b> {{ _("的 Consumer Key 待授权：") }}<a href="{{ pending_url }}" target="_blank" rel="noopener noreferrer">{{ _("点此打开 OVH 授权页面") }}</a>{{ _("，登录并选择 Validity = Unlimited 后授权，回来点右侧按钮。") }}
+  <form method="post" action="/keys/verify" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="endpoint" value="{{ pending_ep }}"><button class="primary sm">{{ ic("check-circle") }} {{ _("我已授权，验证并保存") }}</button></form>
+</div></div>
+{% endif %}
+
+{% for ep in ENDPOINTS %}{% set c = creds[ep] %}
+<div class="card">
+  <div class="row between"><h2>{{ ep }} <span class="muted small">{{ guide[ep].name }}</span></h2>
+    {% if c and c.verified_at %}<span class="tag green">{{ ic("check-circle") }} {{ _("已验证 {0} ·", c.nichandle) }} {{ c.verified_at|lt }}</span>
+    {% elif c and c.consumer_key %}<span class="tag amber">{{ ic("exclamation-circle") }} {{ _("已保存，未验证") }}</span>
+    {% elif c and c.pending %}<span class="tag amber">{{ ic("clock-circle") }} {{ _("Consumer Key 待授权") }}</span>
+    {% else %}<span class="tag gray">{{ _("未配置") }}</span>{% endif %}</div>
+  {% if c %}<p class="mono small muted" style="margin:-6px 0 12px">App Key {{ c.app_key or "-" }} · App Secret {{ c.app_secret or "-" }} · Consumer Key {{ c.consumer_key or "-" }}</p>{% endif %}
+  <form method="post" action="/keys/save">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="endpoint" value="{{ ep }}">
+    <div class="grid3">
+      <label>Application Key<input name="app_key" autocomplete="off" placeholder="{{ _('留空保持不变') if c else _('如 a1b2c3d4e5f6g7h8') }}"></label>
+      <label>Application Secret<input name="app_secret" type="password" autocomplete="new-password" placeholder="{{ _('留空保持不变') if c else _('32 位字符') }}"></label>
+      <label>Consumer Key<input name="consumer_key" type="password" autocomplete="new-password" placeholder="{{ _('留空保持不变') if c and c.consumer_key else _('32 位字符；没有就点「生成」') }}"></label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary">{{ _("加密保存") }}</button>
+      {% if c %}<button formaction="/keys/verify">{{ ic("safety-certificate") }} {{ _("验证") }}</button>{% endif %}
+      <button formaction="/keys/ck-request">{{ ic("key") }} {{ _("生成 Consumer Key") }}</button>
+      {% if c %}<button formaction="/keys/delete" class="danger" data-confirm="{{ _("确定删除 {0} 的密钥？", ep) }}">{{ ic("delete") }} {{ _("删除") }}</button>{% endif %}
+    </div>
+  </form>
+</div>
+{% endfor %}
+{% endblock %}

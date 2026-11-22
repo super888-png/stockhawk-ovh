@@ -1,0 +1,82 @@
+{% from "_macros.html" import ic %}
+{% macro theme_switch() -%}
+<div class="theme" role="group" aria-label="{{ _("外观") }}">
+  <button type="button" data-theme-set="system" title="{{ _("跟随系统") }}" aria-label="{{ _("跟随系统") }}">{{ ic("desktop") }}</button>
+  <button type="button" data-theme-set="light" title="{{ _("浅色") }}" aria-label="{{ _("浅色") }}">{{ ic("sun") }}</button>
+  <button type="button" data-theme-set="dark" title="{{ _("深色") }}" aria-label="{{ _("深色") }}">{{ ic("moon") }}</button>
+</div>
+{%- endmacro %}
+{% macro lang_switch() -%}
+<form method="post" action="/lang" class="theme langsw" role="group" aria-label="Language / 语言">
+  <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ request.url.path }}{{ '?' ~ request.url.query if request.url.query }}">
+  <button name="lang" value="en" title="English" aria-label="English" aria-pressed="{{ 'true' if LANG() == 'en' else 'false' }}">EN</button>
+  <button name="lang" value="zh" title="简体中文" aria-label="简体中文" aria-pressed="{{ 'true' if LANG() == 'zh' else 'false' }}" lang="zh-CN">中</button>
+</form>
+{%- endmacro %}
+<!doctype html>
+<html lang="{{ 'zh-CN' if LANG() == 'zh' else 'en' }}">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fbfbfc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c0c0e" media="(prefers-color-scheme: dark)">
+<script nonce="{{ csp_nonce }}">
+/* Theme: "system" (default) | "light" | "dark", stored in localStorage. Runs before first paint => no flash. */
+(function(){var k="ovhsn.theme",m=window.matchMedia("(prefers-color-scheme: dark)"),d=document.documentElement;
+function pref(){try{return localStorage.getItem(k)||"system"}catch(e){return "system"}}
+function apply(){var p=pref();d.dataset.theme=(p==="system"?(m.matches?"dark":"light"):p);d.dataset.themePref=p;}
+apply();window.__theme={pref:pref,apply:apply,set:function(p){try{p==="system"?localStorage.removeItem(k):localStorage.setItem(k,p)}catch(e){}apply();}};
+(m.addEventListener?m.addEventListener("change",apply):m.addListener(apply));
+window.addEventListener("storage",function(e){if(e.key===k)apply();});})();
+</script>
+<title>{% block title %}{{ _("OVH 抢购") }}{% endblock %} · StockHawk</title>
+<link rel="icon" href="/static/brand/favicon.ico" sizes="any">
+<link rel="icon" href="/static/brand/stockhawk-icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css?v=20">
+{% if LANG() == 'en' %}<script type="application/json" id="i18n-data">{{ I18N_JS()|tojson }}</script>{% endif %}
+<script nonce="{{ csp_nonce }}" src="/static/app.js?v=13"></script>
+</head>
+<body>
+{% if user %}
+{% set path = request.url.path %}
+<div class="shell">
+  <aside class="side">
+    <a class="logo" href="/"><img class="mark brandmark" src="/static/brand/stockhawk-icon.svg" alt="" width="28" height="28"><span>StockHawk <em>for OVH</em><small>{{ _("独服抢购控制台") }}</small></span></a>
+    <nav class="nav">
+      <a href="/" class="{{ 'on' if path == '/' }}">{{ ic("dashboard") }}<span>{{ _("控制台") }}</span></a>
+      <a href="/stock" class="{{ 'on' if path.startswith('/stock') }}">{{ ic("radar-chart") }}<span>{{ _("实时库存") }}</span></a>
+      <a href="/tasks/new" class="{{ 'on' if path.startswith('/tasks') }}">{{ ic("rocket") }}<span>{{ _("抢购任务") }}</span></a>
+      <a href="/orders" class="{{ 'on' if path.startswith('/orders') }}">{{ ic("shopping-cart") }}<span>{{ _("订单记录") }}</span></a>
+      <div class="sep"></div>
+      <a href="/keys" class="{{ 'on' if path.startswith('/keys') }}">{{ ic("key") }}<span>{{ _("OVH 密钥") }}</span></a>
+      <a href="/notify" class="{{ 'on' if path.startswith('/notify') }}">{{ ic("bell") }}<span>{{ _("消息通知") }}</span></a>
+      <a href="/account" class="{{ 'on' if path.startswith('/account') }}">{{ ic("safety-certificate") }}<span>{{ _("账号与安全") }}</span></a>
+      {% if user.is_admin %}<a href="/admin" class="{{ 'on' if path.startswith('/admin') }}">{{ ic("dashboard") }}<span>{{ _("系统状态") }}</span></a>{% endif %}
+    </nav>
+    <div class="bottom">
+      <div class="prefs">{{ theme_switch() }}{{ lang_switch() }}</div>
+      <form method="post" action="/logout" class="me"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <span class="avatar">{{ user.username[:1]|upper }}</span>
+        <div><b>{{ user.username }}</b><span>{{ _("所有者") if user.is_admin else _("用户") }}</span></div>
+        <button class="ghost sm icon" title="{{ _("退出登录") }}" aria-label="{{ _("退出登录") }}">{{ ic("logout") }}</button>
+      </form>
+    </div>
+  </aside>
+  <main class="main">
+    {% if flash %}<div class="flash {{ flash.kind }}">{{ ic("check-circle" if flash.kind == "ok" else "exclamation-circle") }}<div>{{ flash.msg }}</div></div>{% endif %}
+    {% block content %}{% endblock %}
+    <div class="foot">{{ _("时间按浏览器时区显示（") }}<span id="tzname">{{ TZNAME }}</span>{{ _("） · 最小轮询间隔 {0}s · 同型号任务共享库存轮询 · 图标 Ant Design Icons（MIT）", MIN_POLL|round(1)) }}<br>{{ _("StockHawk 是非 OVHcloud 官方项目，与 OVH 无关联") }}</div>
+  </main>
+</div>
+{% else %}
+<div class="auth-theme prefs">{{ theme_switch() }}{{ lang_switch() }}</div>
+<div class="auth"><div class="box">
+  {% if flash %}<div class="flash {{ flash.kind }}">{{ ic("check-circle" if flash.kind == "ok" else "exclamation-circle") }}<div>{{ flash.msg }}</div></div>{% endif %}
+  {% block auth %}{% endblock %}
+</div></div>
+{% endif %}
+<script nonce="{{ csp_nonce }}">window.CSRF = "{{ csrf }}";</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

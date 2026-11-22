@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% from "_macros.html" import ic %}{% block title %}{{ _("登录") }}{% endblock %}
+{% block auth %}
+<div class="hero"><img class="brandhero" src="/static/brand/stockhawk-icon.svg" alt="" width="56" height="56"><h1>StockHawk <span class="for">for OVH</span></h1><p>{{ _("RISE · ADVANCE · KIMSUFI 独服实时抢购") }}</p></div>
+<div class="card">
+  {% if not has_users %}
+  <h2>{{ ic("safety-certificate") }} {{ _("还没有创建账号") }}</h2>
+  <p class="muted small">{{ _("为了安全，账号不能在网页上注册，只能由部署者在服务器上创建。SSH 登录服务器后运行：") }}</p>
+  <pre class="code">cd /opt/ovh-sniper
+docker compose exec ovh-sniper python -m app.cli create-admin</pre>
+  <p class="muted small" style="margin:0">{{ _("按提示输入用户名和密码，然后刷新本页登录。") }}</p>
+  {% else %}
+  <h2>{{ _("登录控制台") }}</h2>
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>{{ _("用户名") }}<input name="username" required autocomplete="username" placeholder="{{ _("你的用户名") }}"></label>
+    <label>{{ _("密码") }}<input name="password" type="password" required autocomplete="current-password" placeholder="••••••••"></label>
+    <button class="primary">{{ _("登录") }}</button>
+  </form>
+  <p class="muted small" style="text-align:center;margin:4px 0 0">{{ _("忘记密码？在服务器上运行") }} <code>python -m app.cli reset-password</code></p>
+  {% endif %}
+</div>
+<p class="muted small disclaimer">{{ _("StockHawk 是非 OVHcloud 官方项目，与 OVH 无关联") }}</p>
+{% endblock %}

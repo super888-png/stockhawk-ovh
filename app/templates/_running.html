@@ -1,0 +1,5 @@
+{% from "_macros.html" import ic %}
+<section class="runstrip" id="runstrip" data-current="{{ t.id if t is defined and t and t.id else '' }}" aria-live="polite">
+  <div class="runstrip-h"><span class="dot" id="rs-dot"></span><b>{{ _("进行中的任务") }}</b><span class="muted small" id="rs-count">{{ _("加载中…") }}</span></div>
+  <div class="runstrip-list" id="rs-list"></div>
+</section>
