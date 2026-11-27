@@ -15,9 +15,10 @@ Kept from the originals, unchanged in spirit:
   * definite 4xx rejection => ORDER_FAIL (no order); anything else (timeout,
     network, 5xx) => PENDING_CONFIRM: stop the task for good and list /me/order
   * after an order: poll /me/order/{id}/status up to ~90s => ORDER_PAID / ORDER_UNPAID
-  * prebuilt-cart fast path (Slots): one verified cart per DC, estimated first
-    invoice = cart item TOTAL + catalog setup fees, x VAT; revalidated, rebuilt
-    before expiry, deleted on stop
+  * prebuilt-cart fast path (Slots): one verified cart per DC; when a price cap
+    is set the cap is OVH's GET /checkout withTax (read at build/refresh, and
+    again before POST if that reading is stale); rebuilt before expiry, deleted
+    on stop
 """
 from __future__ import annotations
 
@@ -114,12 +115,25 @@ Logger = Callable[[str, str], None]  # (marker, message)
 
 
 # ---------------------------------------------------------------- formatting
-def euro(n: Any) -> float:
+def _price_value(n: Any) -> float:
+    """Unwrap an OVH price JSON value. Does not convert units."""
     if n is None:
         return 0.0
     if isinstance(n, dict):
         n = n.get("value", n.get("price", 0))
-    return float(n) / 1e8 if abs(float(n)) >= 1000 else float(n)
+    if n is None:
+        return 0.0
+    return float(n)
+
+
+def catalog_price(n: Any) -> float:
+    """Catalog `pricings[].price` is an integer count of 1e-8 currency units."""
+    return _price_value(n) / 1e8
+
+
+def checkout_price(n: Any) -> float:
+    """Cart lines and GET/POST /order/cart/{id}/checkout prices are currency units (70.11, 1402.20)."""
+    return _price_value(n)
 
 
 def fmt_price(n: float | None, cur: str = "€") -> str:
@@ -161,7 +175,7 @@ def monthly_and_setup(plan_obj: dict) -> tuple[float | None, float | None]:
         if x.get("mode") != "default":
             continue
         caps = x.get("capacities") or []
-        price = euro(x.get("price") or 0)
+        price = catalog_price(x.get("price") or 0)
         if x.get("interval") == 1 and "renew" in caps and monthly is None:
             monthly = price
         if (x.get("interval") in (0, None) or x.get("intervalUnit") == "none") and "installation" in caps and setup is None:
@@ -355,14 +369,14 @@ def extract_prices(preview: dict) -> dict[str, float]:
     out = {}
     if isinstance(prices, list):
         for p in prices:
-            out[str(p.get("label") or p.get("id") or "")] = euro(p.get("price") or p.get("value") or 0)
+            out[str(p.get("label") or p.get("id") or "")] = checkout_price(p.get("price") or p.get("value") or 0)
         return out
     if isinstance(prices, dict):
         for k, v in prices.items():
             if isinstance(v, dict) and ("value" in v or "price" in v or "currencyCode" in v):
-                out[k] = euro(v)
+                out[k] = checkout_price(v)
             elif isinstance(v, (int, float)):
-                out[k] = euro(v)
+                out[k] = checkout_price(v)
     return out
 
 
@@ -372,7 +386,7 @@ def first_invoice_total(preview: dict) -> float | None:
     if isinstance(prices, dict):
         for key in ("withTax", "priceWithTax", "totalWithTax"):
             if key in prices:
-                return euro(prices[key])
+                return checkout_price(prices[key])
     for k, v in extracted.items():
         if "withtax" in k.lower().replace("_", ""):
             return v
@@ -600,16 +614,32 @@ class Slots:
         with self.mu:
             return [v["cid"] for v in self.s.values()]
 
+    def _cap_reason(self, price: float | None) -> str:
+        if price is None:
+            return T("无法解析首期价格，拒绝下单")
+        return T("首期含税 {0:.2f} 超过上限 {1:.2f}", price, self.spec.price_cap)
+
+    def _read_checkout_total(self, cid: str) -> float | None:
+        """Authoritative VAT-inclusive first invoice from OVH. None when the body has no with-tax total."""
+        return first_invoice_total(self.client.get(f"/order/cart/{cid}/checkout"))
+
     def build(self, dc: str) -> dict | None:
         cid = None
         try:
             cid, iid, codes, exp = build_cart(self.client, self.spec, dc, self.memory, self.storage)
-            monthly, exp = verify_cart(self.client, self.spec, cid, iid, dc, codes)
-            price = round((monthly + self.spec.setup_fee(codes)) * self.spec.vat_rate, 2)
-            ok = self.spec.price_cap is None or price <= self.spec.price_cap
-            slot = {"cid": cid, "iid": iid, "codes": codes, "exp": exp, "price": price, "checked": time.time(), "ok": ok}
-            if not ok:
-                self.log("ERROR", T("预建购物车 {0} 估算首期 {1} > 上限 {2}，该机房快速通道停用", dc, price, self.spec.price_cap))
+            _monthly, exp = verify_cart(self.client, self.spec, cid, iid, dc, codes)
+            cap = self.spec.price_cap
+            # Off the stock-hit path: one GET so a later hit can POST without another round trip.
+            price = self._read_checkout_total(cid)
+            quoted = True
+            ok = cap is None or (price is not None and price <= cap)
+            if cap is not None and not ok:
+                if price is None:
+                    self.log("ERROR", T("预建购物车 {0} 失败: {1}: {2}", dc, "checkout", T("无法解析首期价格，拒绝下单")))
+                else:
+                    self.log("ERROR", T("预建购物车 {0} 首期含税 {1} > 上限 {2}，该机房快速通道停用", dc, price, cap))
+            slot = {"cid": cid, "iid": iid, "codes": codes, "exp": exp, "price": price,
+                    "checked": time.time(), "ok": ok, "quoted": quoted}
             with self.mu:
                 old = self.s.get(dc)
                 self.s[dc] = slot
@@ -628,13 +658,15 @@ class Slots:
         if not slot:
             return
         try:
-            monthly, exp = verify_cart(self.client, self.spec, slot["cid"], slot["iid"], dc, slot["codes"])
-            price = round((monthly + self.spec.setup_fee(slot["codes"])) * self.spec.vat_rate, 2)
+            _monthly, exp = verify_cart(self.client, self.spec, slot["cid"], slot["iid"], dc, slot["codes"])
+            cap = self.spec.price_cap
+            price = self._read_checkout_total(slot["cid"])
+            quoted = True
+            ok = cap is None or (price is not None and price <= cap)
             with self.mu:
                 cur = self.s.get(dc)
                 if cur and cur["cid"] == slot["cid"]:
-                    cur.update(price=price, exp=exp, checked=time.time(),
-                               ok=self.spec.price_cap is None or price <= self.spec.price_cap)
+                    cur.update(price=price, exp=exp, checked=time.time(), ok=ok, quoted=quoted)
         except Exception as e:
             self.log("ERROR", T("复核预建购物车 {0} 失败（{1}: {2}），将重建", dc, type(e).__name__, e))
             with self.mu:
@@ -656,14 +688,75 @@ class Slots:
                 stop.wait(0.3)
 
     def ready(self, dc: str) -> bool:
+        """True when this DC's cart can be checked out immediately (no extra GET)."""
         now = time.time()
         with self.mu:
             slot = self.s.get(dc)
-            return bool(slot and slot["ok"] and now - slot["checked"] < FRESH_PRICE_MAX
-                        and slot["exp"] - now > MIN_LEFT_AT_HIT)
+            if not slot or slot["exp"] - now <= MIN_LEFT_AT_HIT:
+                return False
+            if self.spec.price_cap is None:
+                return True
+            price = slot.get("price")
+            return bool(slot.get("quoted") and price is not None and price <= self.spec.price_cap
+                        and now - slot["checked"] < FRESH_PRICE_MAX)
+
+    def _decide(self, dc: str) -> tuple[str, Any]:
+        now = time.time()
+        with self.mu:
+            slot = self.s.get(dc)
+            if not slot or slot["exp"] - now <= MIN_LEFT_AT_HIT:
+                return "miss", None
+            cap = self.spec.price_cap
+            if cap is None:
+                return "use", self.s.pop(dc)
+            fresh = bool(slot.get("quoted")) and now - slot["checked"] < FRESH_PRICE_MAX
+            price = slot.get("price")
+            if fresh and price is not None and price <= cap:
+                return "use", self.s.pop(dc)
+            if fresh:
+                return "stop", self._cap_reason(price)
+            return "refresh", slot["cid"]
+
+    def _store_quote(self, dc: str, cid: str, total: float | None) -> tuple[str, Any]:
+        cap = self.spec.price_cap
+        with self.mu:
+            cur = self.s.get(dc)
+            if not cur or cur["cid"] != cid:
+                return "miss", None
+            ok = total is not None and (cap is None or total <= cap)
+            cur.update(price=total, checked=time.time(), quoted=True, ok=ok)
+            if ok:
+                return "use", self.s.pop(dc)
+            return "stop", self._cap_reason(total)
+
+    def prepare_checkout(self, dc: str) -> tuple[dict | None, str | None]:
+        """Hand out one prebuilt cart, or say why it must not be ordered.
+
+        (cart, None): POST this cart. With a cap, cart['price'] is OVH withTax and <= cap.
+        (None, reason): cap exceeded or the with-tax total could not be read. Do not order.
+        (None, None): no usable prebuilt cart; the slow path may build one.
+        A fresh GET /checkout from build/revalidate is reused, so a stock hit is still one POST.
+        A stale reading costs one GET here, then a POST only if the new total is within the cap.
+        """
+        decision, payload = self._decide(dc)
+        if decision == "refresh":
+            try:
+                total = self._read_checkout_total(payload)
+            except Exception as e:
+                return None, f"{type(e).__name__}: {e}"
+            decision, payload = self._store_quote(dc, payload, total)
+        if decision == "use":
+            self.on_change()
+            return payload, None
+        if decision == "stop":
+            return None, payload
+        return None, None
 
     def take(self, dc: str) -> dict | None:
-        """Single use: a usable slot is removed from the pool (same as the original)."""
+        """Single use: a cart that can be posted immediately is removed from the pool.
+
+        Does not refresh a stale quote and does not report a cap refusal. Callers that must
+        enforce a price cap use prepare_checkout()."""
         if self.ready(dc):
             with self.mu:
                 slot = self.s.pop(dc, None)

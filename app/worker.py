@@ -512,9 +512,20 @@ class TaskRunner:
                     self.L("STOCK_FOUND", T("匹配到库存，开始下单: {0}", desc), notify=False)
                     self._send_card(p, pick, T("正在下单（{0}）", mode), f"{self.task_id}:{p.get('key') or p['planCode']}")
                 self.state["phase"] = "ordering"
-                slot = p["slots"].take(pick["dc"]) if p["slots"] else None
+                slot, blocked = (None, None)
+                if p["slots"]:
+                    slot, blocked = await asyncio.to_thread(p["slots"].prepare_checkout, pick["dc"])
+                if blocked:
+                    # OVH with-tax total is over the cap or unreadable: do not build another cart and do not POST.
+                    self.L("ORDER_FAIL", T("{0} 结账前失败: {1}", desc, blocked))
+                    fails += 1
+                    if fails >= FAIL_LIMIT:
+                        self.L("BACKOFF", T("连续 {0} 次失败，暂停 {1}s", fails, BACKOFF_S))
+                        fails, backoff_until = 0, time.time() + BACKOFF_S
+                    continue
                 if slot:
-                    self.L("ORDER_TRY", T("快速通道：使用预建购物车 {0}（估算首期 {1}{2}）直接结账", slot['cid'], self.sym, slot['price']))
+                    shown = slot["price"] if slot.get("price") is not None else "?"
+                    self.L("ORDER_TRY", T("快速通道：使用预建购物车 {0}（OVH 首期含税 {1}{2}）直接结账", slot['cid'], self.sym, shown))
                     cid = slot["cid"]
                 else:
                     r = await asyncio.to_thread(E.preview_cart, client, spec, pick, self.L, True, workers)
