@@ -7,6 +7,11 @@
   <div class="row">
     {% if live %}
     <form method="post" action="/tasks/{{ t.id }}/stop" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ ic("pause-circle") }} {{ _("停止") }}</button></form>
+    {% elif t.status == "pending_confirm" %}
+    <form method="post" action="/tasks/{{ t.id }}/resume-confirmed" class="inline pending-resume"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="chk"><input type="checkbox" name="confirm" value="yes" required> {{ _("我已在 OVH 控制台核对过订单") }}</label>
+      <button class="primary" data-confirm="{{ _("恢复前会先查询结账时段内的 OVH 订单并计入已下单数。确定恢复？") }}">{{ ic("play-circle") }} {{ _("已核对 OVH 订单，恢复任务") }}</button></form>
+    <a class="btn" href="/tasks/{{ t.id }}/edit">{{ ic("edit") }} {{ _("编辑") }}</a>
     {% else %}
     <form method="post" action="/tasks/{{ t.id }}/start" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="primary" {% if t.notify_only and not TG_OK %}disabled title="{{ TG_WHY }}"{% endif %} {% if not t.dry_run %}data-confirm="{{ _("这是真实下单任务（{0}），有货会{1}。确定启动？", PAY_MODE_CN['pay' if t.auto_pay else 'order'], _('下单并自动扣款') if t.auto_pay else _('提交订单（不扣款）')) }}"{% endif %}>{{ ic("play-circle") }} {{ _("启动") }}</button></form>

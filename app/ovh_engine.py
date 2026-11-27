@@ -31,6 +31,7 @@ from typing import Any, Callable
 import ovh
 import ovh.exceptions as oe
 from .i18n import T, TDict, tr
+from . import ratelimit as RL
 
 ENDPOINTS = {
     "ovh-eu": "https://eu.api.ovh.com/1.0",
@@ -57,7 +58,9 @@ APAC_DCS = {"sgp", "syd", "mum", "bom", "ynm"}
 US_DCS = {"hil", "vin"}
 UNAVAIL = {"unavailable", "unknown", "comingSoon"}
 PAID = {"checking", "delivering", "delivered", "documentsRequested"}
-DEFINITE_REJECT = (oe.BadParametersError, oe.ResourceNotFoundError, oe.ResourceConflictError,
+# Checkout errors that prove no order was created. 409 Conflict is NOT here: OVH can answer 409 for a cart that is
+# already being / has been checked out, so after POST /checkout it means "unknown" => PENDING_CONFIRM (v2.1.1).
+DEFINITE_REJECT = (oe.BadParametersError, oe.ResourceNotFoundError,
                    oe.ResourceExpiredError, oe.Forbidden, oe.NotGrantedCall, oe.NotCredential,
                    oe.InvalidKey, oe.InvalidCredential)
 AUTH_ERRORS = (oe.InvalidKey, oe.InvalidCredential, oe.Forbidden, oe.NotCredential, oe.NotGrantedCall)
@@ -114,12 +117,30 @@ Logger = Callable[[str, str], None]  # (marker, message)
 
 
 # ---------------------------------------------------------------- formatting
-def euro(n: Any) -> float:
-    if n is None:
+# Prices come in two formats and are parsed by SOURCE, never guessed from the magnitude (v2.1.1: the old euro()
+# divided anything >= 1000 by 1e8, so a real €1,234.56 cart total became €0.0000123 and passed every price cap).
+def catalog_price(n: Any) -> float:
+    """/order/catalog/public pricings[].price: an integer in 1/100,000,000 of the currency (1699000000 = 16.99)."""
+    if n is None or isinstance(n, bool):
         return 0.0
-    if isinstance(n, dict):
-        n = n.get("value", n.get("price", 0))
-    return float(n) / 1e8 if abs(float(n)) >= 1000 else float(n)
+    if isinstance(n, dict):          # never expected in the catalog; refuse to guess
+        raise ValueError(f"unexpected catalog price object: {n!r}")
+    return float(n) / 1e8
+
+
+def price_value(p: Any) -> float | None:
+    """Cart / checkout / order price object {"value": 1234.56, "text": "€1,234.56", "currencyCode": "EUR"}: value is
+    already in currency units. "priceInUcents" (1/100,000,000 units) is accepted too. Anything else => None
+    (callers that place orders treat None as "price unknown" and refuse)."""
+    if not isinstance(p, dict):
+        return None
+    v = p.get("value")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    u = p.get("priceInUcents")
+    if isinstance(u, (int, float)) and not isinstance(u, bool):
+        return float(u) / 1e8
+    return None
 
 
 def fmt_price(n: float | None, cur: str = "€") -> str:
@@ -161,7 +182,7 @@ def monthly_and_setup(plan_obj: dict) -> tuple[float | None, float | None]:
         if x.get("mode") != "default":
             continue
         caps = x.get("capacities") or []
-        price = euro(x.get("price") or 0)
+        price = catalog_price(x.get("price") or 0)
         if x.get("interval") == 1 and "renew" in caps and monthly is None:
             monthly = price
         if (x.get("interval") in (0, None) or x.get("intervalUnit") == "none") and "installation" in caps and setup is None:
@@ -196,29 +217,39 @@ def _norm_tokens(code: str, plan: str) -> frozenset:
     return frozenset(t for t in strip_plan_suffix(code.lower(), plan.lower()).split("-") if t and not _NOISE.match(t))
 
 
+def canon_cfg(code: str, plan: str = "") -> frozenset:
+    """Canonical form used for EXACT config matching (v2.1.1): lower-case, whitespace stripped, the plan suffix
+    removed (catalog addons are '<fragment>-<planCode>', availability uses '<fragment>') and the DDR generation token
+    dropped (OVH lists the same stick as ram-64g-ecc-2666 and ram-64g-ddr4-ecc-2666). Every other token must be equal:
+    no substring / prefix matching, so ram-32g never matches ram-32g-ecc-2400 and 2x480 never matches 2x4800."""
+    return _norm_tokens((code or "").strip().lower(), (plan or "").strip().lower())
+
+
+def same_cfg(a: str, b: str, plan: str = "") -> bool:
+    return bool(a) and bool(b) and canon_cfg(a, plan) == canon_cfg(b, plan)
+
+
 def addon_code(plan_obj: dict, family: str, want: str, *, synthesize: bool = True) -> str | None:
-    """Map an availability FQN fragment to a catalog addon planCode.
-    1. exact / '<want>-<plan suffix>'  2. substring  3. same tokens ignoring plan suffix and DDR generation
-    (e.g. ram-64g-ecc-2666 <-> ram-64g-ddr4-ecc-2666-<plan>). Never silently falls back to the family default."""
+    """Map an availability FQN fragment to a catalog addon planCode by EXACT match:
+    1. identical code, or the code minus the plan suffix  2. identical canonical form (canon_cfg), only if unique.
+    No substring / prefix matching (v2.1.1). Never silently falls back to the family default."""
     if not want:
         return None
     codes = family_addons(plan_obj, family)
-    for code in codes:
-        if code == want or code.startswith(want + "-"):
-            return code
-    for code in codes:
-        if want in code:
-            return code
     plan = plan_obj.get("planCode") or ""
-    wt = _norm_tokens(want, plan)
-    same = [c for c in codes if _norm_tokens(c, plan) == wt]
+    w = want.strip()
+    for code in codes:
+        if code == w or strip_plan_suffix(code, plan) == w:
+            return code
+    wt = canon_cfg(w, plan)
+    same = [c for c in codes if canon_cfg(c, plan) == wt]
     if len(same) == 1:
         return same[0]
     if not synthesize:
         return None
-    if plan and not want.endswith(plan):
-        return f"{want}-{plan}"
-    return want
+    if plan and not w.endswith(plan):
+        return f"{w}-{plan}"
+    return w
 
 
 def orderable(plan_obj: dict | None, memory: str, storage: str) -> tuple[bool, str]:
@@ -240,8 +271,8 @@ def orderable(plan_obj: dict | None, memory: str, storage: str) -> tuple[bool, s
 
 def is_default_config(plan_obj: dict, memory: str, storage: str) -> bool:
     defs = default_addons(plan_obj)
-    ram, disk = defs.get("memory", ""), defs.get("storage", "")
-    return bool(ram.startswith(memory) or memory in ram) and bool(disk.startswith(storage) or storage in disk)
+    plan = plan_obj.get("planCode") or ""
+    return same_cfg(memory, defs.get("memory", ""), plan) and same_cfg(storage, defs.get("storage", ""), plan)
 
 
 def allowed_dcs(plan_obj: dict) -> list[str]:
@@ -281,14 +312,15 @@ def stock_signature(stock: list[dict]) -> str:
 
 
 def pick_stock(rows: list[dict], dcs: list[str], any_config: bool, want_ram: str | None,
-               want_disk: str | None) -> dict | None:
+               want_disk: str | None, plan: str = "") -> dict | None:
     """Pick the first matching in-stock row and datacenter (dcs in priority order).
-    Without --any-config and without pinned RAM/disk only the default config is bought."""
+    Without --any-config and without pinned RAM/disk only the default config is bought.
+    Pinned RAM/disk match EXACTLY on the canonical code (same_cfg), never by prefix (v2.1.1)."""
     def ram_ok(row):
-        return (not want_ram) or row["memory"] == want_ram or row["memory"].startswith(want_ram)
+        return (not want_ram) or same_cfg(row["memory"], want_ram, plan)
 
     def disk_ok(row):
-        return (not want_disk) or row["storage"] == want_disk or row["storage"].startswith(want_disk)
+        return (not want_disk) or same_cfg(row["storage"], want_disk, plan)
 
     def dc_ok(row):
         have = [dc for dc, _ in row["datacenters"]]
@@ -326,9 +358,9 @@ def explain_no_match(rows: list[dict], dcs: list[str], any_config: bool, want_ra
         where = ",".join(dc.upper() for dc, _ in r["datacenters"])
         if not r.get("orderable", True):
             why = T("官方目录无此配件，无法下单")
-        elif want_ram and not (r["memory"] == want_ram or r["memory"].startswith(want_ram)):
+        elif want_ram and not same_cfg(r["memory"], want_ram):
             why = T("不是所选内存 {0}", short_ram(want_ram))
-        elif want_disk and not (r["storage"] == want_disk or r["storage"].startswith(want_disk)):
+        elif want_disk and not same_cfg(r["storage"], want_disk):
             why = T("不是所选硬盘 {0}", short_disk(want_disk))
         elif not r["is_default"] and not any_config and not want_ram and not want_disk:
             why = T("非基础配置（未开启「允许非基础配置」）")
@@ -355,14 +387,17 @@ def extract_prices(preview: dict) -> dict[str, float]:
     out = {}
     if isinstance(prices, list):
         for p in prices:
-            out[str(p.get("label") or p.get("id") or "")] = euro(p.get("price") or p.get("value") or 0)
+            if not isinstance(p, dict):
+                continue
+            v = price_value(p.get("price")) if isinstance(p.get("price"), dict) else price_value(p)
+            if v is not None:
+                out[str(p.get("label") or p.get("id") or "")] = v
         return out
     if isinstance(prices, dict):
-        for k, v in prices.items():
-            if isinstance(v, dict) and ("value" in v or "price" in v or "currencyCode" in v):
-                out[k] = euro(v)
-            elif isinstance(v, (int, float)):
-                out[k] = euro(v)
+        for k, v in prices.items():          # bare numbers are ambiguous (unit unknown): skipped, never guessed
+            pv = price_value(v)
+            if pv is not None:
+                out[k] = pv
     return out
 
 
@@ -372,7 +407,7 @@ def first_invoice_total(preview: dict) -> float | None:
     if isinstance(prices, dict):
         for key in ("withTax", "priceWithTax", "totalWithTax"):
             if key in prices:
-                return euro(prices[key])
+                return price_value(prices[key])    # None if missing/unparseable => callers refuse to order
     for k, v in extracted.items():
         if "withtax" in k.lower().replace("_", ""):
             return v
@@ -484,7 +519,7 @@ class OrderSpec:
                 continue
             if want and name in ("memory", "storage"):
                 default = fam.get("default") or ""
-                listed = any(c == want or c.startswith(want + "-") or want in c for c in (fam.get("addons") or []))
+                listed = any(c == want or same_cfg(c, want, self.plan) for c in (fam.get("addons") or []))
                 if not listed and code == default:
                     raise RuntimeError(T("{0} 配件 {1} 不在官方目录中，拒绝改用默认 {2}", name, want, default))
             codes.append(code)
@@ -595,6 +630,18 @@ class Slots:
         self.mu = threading.Lock()
         self.s: dict[str, dict] = {}
         self.on_change = on_change or (lambda: None)
+        self.rl_key: tuple | None = None   # ("acct", user_id, endpoint): shared 429 back-off
+
+    def _real_price(self, cid: str, estimate: float) -> tuple[float, bool]:
+        """Pre-read OVH's real first-invoice total incl. tax while the cart is warm (GET /checkout), so the slot's
+        price is the real one and the hit-time check is only a final verification. Falls back to the estimate."""
+        try:
+            real = first_invoice_total(self.client.get(f"/order/cart/{cid}/checkout"))
+        except Exception as e:
+            if RL.is_429(e) and self.rl_key:
+                RL.hit(self.rl_key, RL.retry_after_of(e))
+            real = None
+        return (round(real, 2), True) if real is not None else (estimate, False)
 
     def cart_ids(self) -> list[str]:
         with self.mu:
@@ -605,9 +652,9 @@ class Slots:
         try:
             cid, iid, codes, exp = build_cart(self.client, self.spec, dc, self.memory, self.storage)
             monthly, exp = verify_cart(self.client, self.spec, cid, iid, dc, codes)
-            price = round((monthly + self.spec.setup_fee(codes)) * self.spec.vat_rate, 2)
+            price, real = self._real_price(cid, round((monthly + self.spec.setup_fee(codes)) * self.spec.vat_rate, 2))
             ok = self.spec.price_cap is None or price <= self.spec.price_cap
-            slot = {"cid": cid, "iid": iid, "codes": codes, "exp": exp, "price": price, "checked": time.time(), "ok": ok}
+            slot = {"cid": cid, "iid": iid, "codes": codes, "exp": exp, "price": price, "real": real, "checked": time.time(), "ok": ok}
             if not ok:
                 self.log("ERROR", T("预建购物车 {0} 估算首期 {1} > 上限 {2}，该机房快速通道停用", dc, price, self.spec.price_cap))
             with self.mu:
@@ -618,6 +665,8 @@ class Slots:
                 safe_delete(self.client, old["cid"])
             return slot
         except Exception as e:
+            if RL.is_429(e) and self.rl_key:
+                RL.hit(self.rl_key, RL.retry_after_of(e))
             self.log("ERROR", T("预建购物车 {0} 失败: {1}: {2}", dc, type(e).__name__, e))
             safe_delete(self.client, cid)
             return None
@@ -629,13 +678,16 @@ class Slots:
             return
         try:
             monthly, exp = verify_cart(self.client, self.spec, slot["cid"], slot["iid"], dc, slot["codes"])
-            price = round((monthly + self.spec.setup_fee(slot["codes"])) * self.spec.vat_rate, 2)
+            price, real = self._real_price(slot["cid"], round((monthly + self.spec.setup_fee(slot["codes"])) * self.spec.vat_rate, 2))
             with self.mu:
                 cur = self.s.get(dc)
                 if cur and cur["cid"] == slot["cid"]:
-                    cur.update(price=price, exp=exp, checked=time.time(),
+                    cur.update(price=price, real=real, exp=exp, checked=time.time(),
                                ok=self.spec.price_cap is None or price <= self.spec.price_cap)
         except Exception as e:
+            if RL.is_429(e) and self.rl_key:
+                RL.hit(self.rl_key, RL.retry_after_of(e))
+                return                      # rate limited: keep the slot, retry after the back-off
             self.log("ERROR", T("复核预建购物车 {0} 失败（{1}: {2}），将重建", dc, type(e).__name__, e))
             with self.mu:
                 if (self.s.get(dc) or {}).get("cid") == slot["cid"]:
@@ -644,7 +696,7 @@ class Slots:
     def maintain_once(self, stop: threading.Event) -> None:
         now = time.time()
         for dc in self.dcs:
-            if stop.is_set():
+            if stop.is_set() or (self.rl_key and RL.remaining(self.rl_key) > 0):
                 return
             with self.mu:
                 slot = self.s.get(dc)
@@ -691,6 +743,27 @@ class CheckoutResult:
         self.outcome, self.info = outcome, info
 
 
+def check_cart_price(client, spec: OrderSpec, cid: str, log: Logger) -> CheckoutResult:
+    """GET /order/cart/{cid}/checkout and compare OVH's REAL first-invoice total incl. tax (prices.withTax) to the cap.
+    Fails closed: unreadable / missing price => rejected (cart deleted). Used right before every real checkout,
+    including the prebuilt-cart fast path whose local estimate is only a prefilter (v2.1.1)."""
+    try:
+        prev = client.get(f"/order/cart/{cid}/checkout")
+    except Exception as e:
+        safe_delete(client, cid)
+        return CheckoutResult("rejected", reason=T("读取购物车真实价格失败 {0}: {1}，拒绝下单", type(e).__name__, e),
+                              rate_limited=RL.is_429(e), retry_after=RL.retry_after_of(e))
+    total = first_invoice_total(prev)
+    log("PREVIEW", T("购物车预览: ") + json.dumps(prev.get("prices", prev), ensure_ascii=False, default=str)[:800])
+    if total is None:
+        safe_delete(client, cid)
+        return CheckoutResult("rejected", reason=T("无法解析首期价格，拒绝下单"))
+    if spec.price_cap is not None and total > spec.price_cap:
+        safe_delete(client, cid)
+        return CheckoutResult("rejected", reason=T("首期含税 {0:.2f} 超过上限 {1:.2f}", total, spec.price_cap), total=total)
+    return CheckoutResult("preview", cid=cid, total=total)
+
+
 def preview_cart(client, spec: OrderSpec, pick: dict, log: Logger, keep: bool = False,
                  workers: list | None = None) -> CheckoutResult:
     """Slow path part 1: build cart, GET /checkout, parse first invoice, enforce cap. Deletes cart unless keep.
@@ -713,7 +786,8 @@ def preview_cart(client, spec: OrderSpec, pick: dict, log: Logger, keep: bool = 
         return CheckoutResult("preview", cid=cid, total=total, codes=codes)
     except Exception as e:
         safe_delete(client, cid)
-        return CheckoutResult("failed", reason=f"{type(e).__name__}: {e}")
+        return CheckoutResult("failed", reason=f"{type(e).__name__}: {e}", rate_limited=RL.is_429(e),
+                              retry_after=RL.retry_after_of(e))
 
 
 def checkout(client, spec: OrderSpec, cid: str, since_iso: str, log: Logger) -> CheckoutResult:

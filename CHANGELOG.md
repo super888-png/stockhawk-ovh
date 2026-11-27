@@ -1,5 +1,22 @@
 # Changelog · 更新记录
 
+## v2.1.1 · Security/safety fixes · 安全修复
+- **Price parsing by source, never by magnitude.** The old `euro()` divided any value ≥ 1000 by 1e8, so a real €1,234.56 cart total became ≈ €0.00001 and passed every price cap. Catalog prices (`catalog_price`, 1/100,000,000 units) and cart/checkout price objects (`price_value`: `value` / `priceInUcents`) are now parsed separately; bare or unknown values count as "price unknown" and orders are refused.
+- **Real OVH total checked before every checkout.** The fast lane used to check out a prebuilt cart against a local estimate (up to 45 min old, non-EU VAT taken as 1.0). It now reads `GET /order/cart/{id}/checkout` → `prices.withTax` right before `POST /checkout` and aborts (cart deleted, nothing ordered) if it's over the cap or missing. Prebuilt carts also pre-read the real price while warm, so the hit-time read is only a final check.
+- **Exact config matching.** RAM/disk/default-config matching used substrings and `startswith` (`ram-32g` matched `ram-32g-ecc-3200-ext`, `2x512` matched `2x5120`). Now exact on a canonical code: lower-case, trimmed, plan suffix removed, DDR generation ignored; every other token must match.
+- **409 at checkout = uncertain.** 409 Conflict (like timeouts / 5xx) after `POST /checkout` now stops the task as `pending_confirm` with a Telegram alert, with no retry.
+- **No one-click restart of `pending_confirm` tasks.** Plain start is refused. The task page asks you to tick "I have checked my orders in the OVH control panel"; before resuming, OVH orders created around the uncertain checkout are looked up and counted towards max orders. A task whose order did go through is marked done instead of buying again. If OVH can't be queried, the task stays stopped.
+- **Order lock across tasks and processes.** `fcntl.flock` under `data/locks/`, keyed per OVH account (user + endpoint) and plan, around cart → price check → checkout. The task's max orders is re-read inside the lock.
+- **429 handling.** Shared back-off per endpoint (public availability) and per OVH account (carts/checkout): honours `Retry-After` (seconds or HTTP-date), exponential back-off with jitter, capped at 300 s, reset on success. No tight retry loops. `MIN_POLL_INTERVAL` can't go below 3 s.
+- Tests: `tests/safety_v211_test.py`.
+- **按来源解析价格**：不再按数值大小猜单位（原来 ≥1000 一律除以 1e8，导致 €1000 以上的含税价被算得极小，上限失效）。
+- **每次结账前读取 OVH 真实含税总价**：快速通道也会在结账前读取 `prices.withTax`，超上限或读不到就中止，不下单；预建购物车预热时也会预读真实价格。
+- **配置精确匹配**：不再用子串 / 前缀匹配。
+- **结账返回 409 视为结果不确定**：任务停止、待人工确认，并发送 Telegram 提醒，不再重试。
+- **待确认任务不能一键重启**：需勾选「我已在 OVH 控制台核对过订单」；恢复前会自动查询结账时段内的 OVH 订单并计入已下单数，查询失败则保持停止。
+- **跨任务 / 跨进程下单锁**：同一账号同一型号同时只有一个任务能进入购物车到结账的流程。
+- **429 限流**：遵守 `Retry-After`，指数退避加随机抖动，同一账号 / 端点的所有任务共享退避；轮询间隔最低 3 秒。
+
 ## v2.1.0
 - **Prettier installer output.** `install.sh` shows a StockHawk banner with the version, numbered steps `[1/9]…[9/9]` with spinners and ✔ / ✖ / ! status, and a summary box (panel URL, directory, log, commands, HTTPS tip, GitHub and www.7919.net). Noisy apt / Docker / git / build output goes to `/opt/ovh-sniper/install.log` (mode 600); on failure the last 15 lines and the log path are printed. Re-running on an existing install shows "updating" and keeps `.env` / `data/`. Plain text, no colours or spinners when the output is not a terminal, `NO_COLOR` is set or `TERM=dumb`; prompts still read from `/dev/tty` under `curl | sudo bash`. All env vars and behaviour unchanged.
 - **安装脚本输出美化**：横幅 + 版本号、带进度动画的步骤 `[1/9]`、✔ / ✖ / ! 状态和最后的汇总框；apt / Docker / 构建等详细输出写入 `/opt/ovh-sniper/install.log`，失败时打印最后几行和日志路径；非终端、`NO_COLOR` 或 `TERM=dumb` 时自动改为纯文本。环境变量和行为不变。

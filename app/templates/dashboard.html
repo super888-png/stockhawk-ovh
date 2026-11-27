@@ -49,6 +49,8 @@
     <td class="actions"><div class="row">
       {% if v.running %}
       <form method="post" action="/tasks/{{ t.id }}/stop" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="/"><button class="sm">{{ ic("pause-circle") }} {{ _("停止") }}</button></form>
+      {% elif t.status == "pending_confirm" %}
+      <a class="btn sm" href="/tasks/{{ t.id }}" title="{{ _("上次结账结果不确定，需先核对 OVH 订单") }}">{{ ic("play-circle") }} {{ _("需确认") }}</a>
       {% else %}
       <form method="post" action="/tasks/{{ t.id }}/start" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sm" {% if not t.dry_run %}data-confirm="{{ _("任务 #{0} 是真实下单任务（{1}），确定启动？", t.id, _('下单并自动付款') if t.auto_pay else _('只下单不付款')) }}"{% endif %}>{{ ic("play-circle") }} {{ _("启动") }}</button></form>
       <a class="btn sm icon" href="/tasks/{{ t.id }}/edit" title="{{ _("编辑") }}" aria-label="{{ _("编辑") }}">{{ ic("edit") }}</a>

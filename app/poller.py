@@ -14,6 +14,7 @@ import httpx
 
 from .config import MIN_POLL_INTERVAL
 from . import ovh_engine as E
+from . import ratelimit as RL
 from .i18n import T, tr
 
 log = logging.getLogger("poller")
@@ -47,15 +48,22 @@ class Feed:
         url = f"{E.ENDPOINTS[self.endpoint]}/dedicated/server/datacenter/availabilities"
         client = self.hub.client(self.endpoint)
         while self.alive():
+            rl_key = ("public", self.endpoint)
+            wait = RL.remaining(rl_key)          # shared by every feed of this endpoint
+            if wait > 0:
+                self.error = T("OVH 限流 429，等待 {0:.0f}s", wait)
+                await asyncio.sleep(min(wait, 30.0))
+                continue
             t0 = time.monotonic()
             try:
                 r = await client.get(url, params={"planCode": self.plan})
                 if r.status_code == 429:
-                    wait = float(r.headers.get("Retry-After") or 5)
+                    wait = RL.hit(rl_key, RL.retry_after_of(r))   # Retry-After + exponential back-off with jitter
                     self.error = T("OVH 限流 429，等待 {0:.0f}s", wait)
-                    await asyncio.sleep(wait)
+                    log.warning("429 from %s (%s), backing off %.0fs", self.endpoint, self.plan, wait)
                     continue
                 r.raise_for_status()
+                RL.ok(rl_key)
                 self.data, self.error, self.last_ok = r.json(), None, time.time()
             except Exception as e:
                 self.error = f"{type(e).__name__}: {e}"

@@ -26,7 +26,7 @@ def _mode_prices(obj: dict | None, mode: str, months: int) -> tuple[float | None
         rows = [x for x in (obj or {}).get("pricings") or [] if x.get("mode") == "default"]
     for x in rows:
         caps = x.get("capacities") or []
-        price = E.euro(x.get("price") or 0)
+        price = E.catalog_price(x.get("price") or 0)
         if "installation" in caps and (x.get("interval") in (0, None) or x.get("intervalUnit") == "none"):
             setup = price if setup is None else setup
         elif "renew" in caps and x.get("interval"):

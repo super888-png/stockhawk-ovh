@@ -6,7 +6,9 @@ DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.dirna
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{os.path.join(DATA_DIR, 'app.db')}")
 CACHE_DIR = os.path.join(DATA_DIR, "catalog_cache")
 # Minimum allowed poll interval (seconds). Enforced server-side for every task.
-MIN_POLL_INTERVAL = float(os.environ.get("MIN_POLL_INTERVAL", "5"))
+# Hard floor: no env / config / task can poll OVH faster than this (v2.1.1)
+HARD_MIN_POLL = 3.0
+MIN_POLL_INTERVAL = max(HARD_MIN_POLL, float(os.environ.get("MIN_POLL_INTERVAL", "5") or 5))
 # Set COOKIE_SECURE=1 when served over HTTPS (recommended in production).
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
 APP_TZ = os.environ.get("APP_TZ", "Asia/Shanghai")

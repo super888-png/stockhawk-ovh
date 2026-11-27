@@ -1153,6 +1153,10 @@ def task_detail(tid: int, request: Request, user: User = Depends(require_user), 
 async def task_start(tid: int, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
     await form_csrf(request)
     t = _task_or_404(db, user, tid)
+    if t.status == "pending_confirm":
+        # an earlier checkout had an unknown result: a plain restart could order a second server (v2.1.1)
+        flash(request, T("该任务上次结账结果不确定。请先到 OVH 控制台核对订单，再在任务页使用「已核对 OVH 订单，恢复任务」"), "err")
+        return redirect(f"/tasks/{tid}")
     if t.notify_only:
         ok, why = tg_status(db, user.id)
         if not ok:
@@ -1168,6 +1172,69 @@ async def task_start(tid: int, request: Request, user: User = Depends(require_us
     audit(request, user.id, "task_start", f"#{tid}")
     manager.start(tid)
     flash(request, T("任务已启动"))
+    return redirect(f"/tasks/{tid}")
+
+
+def _orders_around_pending(t: Task, pending_ts: dt.datetime) -> list[dict]:
+    """OVH orders created from 3 min before to 15 min after the uncertain checkout (raises on API errors)."""
+    from .worker import load_creds
+    creds = load_creds(t.user_id, t.endpoint)
+    if not creds:
+        raise RuntimeError(T("没有保存 {0} 的 OVH 密钥", t.endpoint))
+    client = E.make_client(t.endpoint, *creds, timeout=(5, 20))
+    utc = pending_ts.replace(tzinfo=dt.timezone.utc)
+    ids = client.get("/me/order", **{"date.from": (utc - dt.timedelta(minutes=3)).isoformat(),
+                                     "date.to": (utc + dt.timedelta(minutes=15)).isoformat()})
+    out = []
+    for oid in (ids or [])[-20:]:
+        o = client.get(f"/me/order/{oid}")
+        out.append({"orderId": oid, "date": o.get("date"), "url": o.get("url"),
+                    "priceWithTax": E.price_value(o.get("priceWithTax"))})
+    return out
+
+
+@app.post("/tasks/{tid}/resume-confirmed")
+async def task_resume_confirmed(tid: int, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    """Resume a pending_confirm task only after the owner ticked "I have checked my OVH orders". OVH orders created
+    around the uncertain checkout are looked up first and counted towards the task's max orders, so a checkout that
+    did go through is never bought twice. Fails closed: if OVH can't be queried the task stays stopped."""
+    form = await form_csrf(request)
+    t = _task_or_404(db, user, tid)
+    if t.status != "pending_confirm":
+        return redirect(f"/tasks/{tid}")
+    if form.get("confirm") != "yes":
+        flash(request, T("请先勾选「我已在 OVH 控制台核对过订单」"), "err")
+        return redirect(f"/tasks/{tid}")
+    last = db.scalar(select(TaskLog).where(TaskLog.task_id == tid, TaskLog.marker == "PENDING_CONFIRM")
+                     .order_by(TaskLog.id.desc()).limit(1))
+    pending_ts = last.ts if last else utcnow()
+    try:
+        found = await asyncio.to_thread(_orders_around_pending, t, pending_ts)
+    except Exception as e:
+        flash(request, T("无法查询 OVH 订单（{0}），为避免重复下单任务保持停止。请稍后重试", type(e).__name__), "err")
+        return redirect(f"/tasks/{tid}")
+    known = {str(o) for o in db.scalars(select(Order.order_id).where(Order.user_id == t.user_id, Order.order_id != ""))}
+    new = [o for o in found if str(o["orderId"]) not in known]
+    for o in new:
+        db.add(Order(user_id=t.user_id, task_id=t.id, kind="order", order_id=str(o["orderId"]), url=o.get("url") or "",
+                     plan_code=t.plan_code or "", price_with_tax=o.get("priceWithTax"), status="found-after-pending",
+                     endpoint=t.endpoint, detail=json.dumps({"source": "resume-confirmed", "date": o.get("date")})))
+    for o in db.scalars(select(Order).where(Order.task_id == tid, Order.kind == "pending", Order.status == "pending-confirm")):
+        o.status = "pending-resolved"
+    t.orders_done = (t.orders_done or 0) + len(new)
+    note = T("恢复前查询到结账时段内的 OVH 订单 {0} 个（新记录 {1} 个）", len(found), len(new))
+    db.add(TaskLog(task_id=tid, marker="INFO", msg=T("用户确认已核对 OVH 订单。") + note))
+    if t.orders_done >= t.max_orders:
+        t.enabled, t.status, t.status_text = False, "done", T("完成：已下单 {0}", t.orders_done)
+        db.commit()
+        audit(request, user.id, "task_resume_confirmed", f"#{tid} found={len(found)} new={len(new)} done")
+        flash(request, note + T("；已达到最大下单数，任务标记为完成，不会再下单"))
+        return redirect(f"/tasks/{tid}")
+    t.enabled, t.status, t.status_text = True, "starting", T("启动中")
+    db.commit()
+    audit(request, user.id, "task_resume_confirmed", f"#{tid} found={len(found)} new={len(new)}")
+    manager.start(tid)
+    flash(request, note + T("；任务已恢复"))
     return redirect(f"/tasks/{tid}")
 
 

@@ -27,6 +27,8 @@ from .notify import IMPORTANT, send as notify_send, send_card as notify_card, ma
 from .poller import hub
 from .security import dec
 from . import ovh_engine as E
+from .orderlock import order_lock_for
+from . import ratelimit as RL
 from .i18n import T, ljoin, set_lang, tr
 
 log = logging.getLogger("worker")
@@ -370,6 +372,7 @@ class TaskRunner:
                 if p["memory"] and p["storage"]:
                     p["slots"] = E.Slots(E.make_client(t.endpoint, *creds, timeout=(5, 15)), p["spec"],
                                          p["memory"], p["storage"], p["dcs"], self.L, on_change=_persist)
+                    p["slots"].rl_key = ("acct", t.user_id, t.endpoint)
             n = sum(1 for p in plans if p["slots"])
             if n:
                 self.slots_list = [p["slots"] for p in plans if p["slots"]]
@@ -435,7 +438,7 @@ class TaskRunner:
                     p["sig"] = sig
                     p["stock"] = stock
                     pick = None if p["blocked"] else E.pick_stock(stock, p["dcs"], t.any_config, p["memory"] or None,
-                                                                 p["storage"] or None)
+                                                                 p["storage"] or None, p["planCode"])
                     nomatch = "" if pick else E.explain_no_match(stock, p["dcs"], t.any_config, p["memory"] or None,
                                                                   p["storage"] or None)
                     if nomatch and nomatch != p["nomatch"]:
@@ -511,63 +514,98 @@ class TaskRunner:
                     p["last_preview_sig"] = p["sig"]
                     self.L("STOCK_FOUND", T("匹配到库存，开始下单: {0}", desc), notify=False)
                     self._send_card(p, pick, T("正在下单（{0}）", mode), f"{self.task_id}:{p.get('key') or p['planCode']}")
-                self.state["phase"] = "ordering"
-                slot = p["slots"].take(pick["dc"]) if p["slots"] else None
-                if slot:
-                    self.L("ORDER_TRY", T("快速通道：使用预建购物车 {0}（估算首期 {1}{2}）直接结账", slot['cid'], self.sym, slot['price']))
-                    cid = slot["cid"]
-                else:
-                    r = await asyncio.to_thread(E.preview_cart, client, spec, pick, self.L, True, workers)
-                    if r.outcome != "preview":
-                        self.L("ORDER_FAIL", T("{0} 结账前失败: {1}", desc, r.info.get('reason')))
+                rl_key = ("acct", t.user_id, t.endpoint)
+                rl_wait = RL.remaining(rl_key)
+                if rl_wait > 0:   # this OVH account is rate limited (429): shared by all its tasks, no tight retries
+                    if p.get("rl_logged", 0) < time.time() - 60:
+                        p["rl_logged"] = time.time()
+                        self.L("INFO", T("OVH 限流 429，本账号所有任务暂停下单 {0:.0f}s", rl_wait), notify=False)
+                    continue
+                olock = order_lock_for(t.user_id, t.endpoint, p["planCode"])
+                if not olock.acquire():
+                    # another task (or process) is ordering this plan on this OVH account right now
+                    self.L("INFO", T("{0} 另一个任务正在为同一账号下单同一型号，本轮跳过以免重复下单", p['planCode']), notify=False)
+                    continue
+                try:
+                    with SessionLocal() as db:   # per-task max: re-read the stored count inside the lock
+                        row = db.get(Task, self.task_id)
+                        done_db = (row.orders_done or 0) if row else 0
+                    if max(done_db, orders_done) >= t.max_orders:
+                        self.L("DONE", T("已下单 {0}/{1}，不再下单", max(done_db, orders_done), t.max_orders))
+                        set_status(self.task_id, "done", T("完成：已下单 {0}", max(done_db, orders_done)), enabled=False)
+                        return
+                    self.state["phase"] = "ordering"
+                    slot = p["slots"].take(pick["dc"]) if p["slots"] else None
+                    if slot:
+                        self.L("ORDER_TRY", T("快速通道：使用预建购物车 {0}（估算首期 {1}{2}），结账前读取 OVH 真实含税价", slot['cid'], self.sym, slot['price']))
+                        # the estimate (up to 45 min old, VAT guessed) is only a prefilter: compare OVH's real total first
+                        r = await asyncio.to_thread(E.check_cart_price, client, spec, slot["cid"], self.L)
+                        if r.outcome != "preview":
+                            if r.info.get("rate_limited"):
+                                RL.hit(rl_key, r.info.get("retry_after"))
+                            self.L("ORDER_FAIL", T("{0} 快速通道结账前价格检查未通过，未下单: {1}", desc, r.info.get('reason')))
+                            fails += 1
+                            if fails >= FAIL_LIMIT:
+                                self.L("BACKOFF", T("连续 {0} 次失败，暂停 {1}s", fails, BACKOFF_S))
+                                fails, backoff_until = 0, time.time() + BACKOFF_S
+                            continue
+                        cid = slot["cid"]
+                    else:
+                        r = await asyncio.to_thread(E.preview_cart, client, spec, pick, self.L, True, workers)
+                        if r.outcome != "preview":
+                            if r.info.get("rate_limited"):
+                                RL.hit(rl_key, r.info.get("retry_after"))
+                            self.L("ORDER_FAIL", T("{0} 结账前失败: {1}", desc, r.info.get('reason')))
+                            fails += 1
+                            if fails >= FAIL_LIMIT:
+                                self.L("BACKOFF", T("连续 {0} 次失败，暂停 {1}s", fails, BACKOFF_S))
+                                fails, backoff_until = 0, time.time() + BACKOFF_S
+                            continue
+                        cid = r.info["cid"]
+                    if self.stop_evt.is_set() or orders_done >= t.max_orders:
+                        # original do_checkout(): group lock re-checked right before POST /checkout
+                        await asyncio.to_thread(E.safe_delete, client, cid)
+                        self.L("INFO", T("任务已停止/已达上限，放弃本次结账并删除购物车"))
+                        break
+                    self.in_checkout = True
+                    set_status(self.task_id, "checkout", T("结账请求进行中"))
+                    try:
+                        res = await asyncio.to_thread(E.checkout, client, spec, cid, since_iso, self.L)
+                        self.after_checkout = res.outcome in ("ordered", "pending")
+                    finally:
+                        self.in_checkout = False
+                    if res.outcome == "rejected":
+                        set_status(self.task_id, "running", T("监控中"))
+                        self.L("ORDER_FAIL", T("{0} 结账被 OVH 拒绝（未生成订单）: {1}", desc, res.info.get('reason')))
                         fails += 1
                         if fails >= FAIL_LIMIT:
                             self.L("BACKOFF", T("连续 {0} 次失败，暂停 {1}s", fails, BACKOFF_S))
                             fails, backoff_until = 0, time.time() + BACKOFF_S
                         continue
-                    cid = r.info["cid"]
-                if self.stop_evt.is_set() or orders_done >= t.max_orders:
-                    # original do_checkout(): group lock re-checked right before POST /checkout
-                    await asyncio.to_thread(E.safe_delete, client, cid)
-                    self.L("INFO", T("任务已停止/已达上限，放弃本次结账并删除购物车"))
-                    break
-                self.in_checkout = True
-                set_status(self.task_id, "checkout", T("结账请求进行中"))
-                try:
-                    res = await asyncio.to_thread(E.checkout, client, spec, cid, since_iso, self.L)
-                    self.after_checkout = res.outcome in ("ordered", "pending")
+                    if res.outcome == "pending":
+                        self.record_order("pending", pick, plan=p["planCode"], status="pending-confirm",
+                                          detail={"error": res.info.get("reason"), "recentOrders": res.info.get("recent")})
+                        self.L("PENDING_CONFIRM", T("最近订单: ") + json.dumps(res.info.get("recent"), ensure_ascii=False, default=str)[:1500]
+                               + T("\n请到 OVH 控制台确认是否已下单。任务已停止；核对后在任务页点「已核对 OVH 订单，恢复任务」。"))
+                        set_status(self.task_id, "pending_confirm", T("结账结果不确定，请人工确认"), enabled=False)
+                        return
+                    fails = 0
+                    orders_done += 1
+                    oid, url, total = res.info.get("orderId"), res.info.get("url"), res.info.get("total")
+                    set_status(self.task_id, "running", T("已下单 {0}/{1}", orders_done, t.max_orders), orders_done=orders_done)
+                    order_row = self.record_order("order", pick, plan=p["planCode"], order_id=oid, url=url, total=total,
+                                                  status="ordered" if t.auto_pay else "unpaid", ctype=spec.catalog_type,
+                                                  detail={k: v for k, v in res.info.items() if k != "raw"})
+                    cny = T("（{0}）", c) if (c := fx_cny(total, self.cur)) else ""
+                    self.L("ORDER_PLACED", T("{0} orderId={1} 首期含税 {2} 结账耗时 {3}ms 链接 {4}", desc, oid, E.fmt_price(total, self.sym), res.info.get('checkout_ms'), url),
+                           title=T("订单已提交 #{0}", oid), link=url,
+                           text=ljoin("\n", [desc, T("首期含税 {0}{1}", E.fmt_price(total, self.sym), cny),
+                                            T("付款方式：自动扣款中…") if t.auto_pay else T("付款方式：只下单不付款，请尽快到 OVH 付款（点下方链接）"),
+                                            T("本任务已下单 {0}/{1}", orders_done, t.max_orders)]))
+                    if t.price_cap is not None and (total is None or total > t.price_cap):
+                        self.L("ORDER_OVER_CAP", T("订单 {0} 首期 {1} 对比上限 {2}，请检查", oid, total, t.price_cap))
                 finally:
-                    self.in_checkout = False
-                if res.outcome == "rejected":
-                    set_status(self.task_id, "running", T("监控中"))
-                    self.L("ORDER_FAIL", T("{0} 结账被 OVH 拒绝（未生成订单）: {1}", desc, res.info.get('reason')))
-                    fails += 1
-                    if fails >= FAIL_LIMIT:
-                        self.L("BACKOFF", T("连续 {0} 次失败，暂停 {1}s", fails, BACKOFF_S))
-                        fails, backoff_until = 0, time.time() + BACKOFF_S
-                    continue
-                if res.outcome == "pending":
-                    self.record_order("pending", pick, plan=p["planCode"], status="pending-confirm",
-                                      detail={"error": res.info.get("reason"), "recentOrders": res.info.get("recent")})
-                    self.L("PENDING_CONFIRM", T("最近订单: ") + json.dumps(res.info.get("recent"), ensure_ascii=False, default=str)[:1500]
-                           + T("\n请到 OVH 控制台确认是否已下单。任务已永久停止，确认后可手动重新启动。"))
-                    set_status(self.task_id, "pending_confirm", T("结账结果不确定，请人工确认"), enabled=False)
-                    return
-                fails = 0
-                orders_done += 1
-                oid, url, total = res.info.get("orderId"), res.info.get("url"), res.info.get("total")
-                set_status(self.task_id, "running", T("已下单 {0}/{1}", orders_done, t.max_orders), orders_done=orders_done)
-                order_row = self.record_order("order", pick, plan=p["planCode"], order_id=oid, url=url, total=total,
-                                              status="ordered" if t.auto_pay else "unpaid", ctype=spec.catalog_type,
-                                              detail={k: v for k, v in res.info.items() if k != "raw"})
-                cny = T("（{0}）", c) if (c := fx_cny(total, self.cur)) else ""
-                self.L("ORDER_PLACED", T("{0} orderId={1} 首期含税 {2} 结账耗时 {3}ms 链接 {4}", desc, oid, E.fmt_price(total, self.sym), res.info.get('checkout_ms'), url),
-                       title=T("订单已提交 #{0}", oid), link=url,
-                       text=ljoin("\n", [desc, T("首期含税 {0}{1}", E.fmt_price(total, self.sym), cny),
-                                        T("付款方式：自动扣款中…") if t.auto_pay else T("付款方式：只下单不付款，请尽快到 OVH 付款（点下方链接）"),
-                                        T("本任务已下单 {0}/{1}", orders_done, t.max_orders)]))
-                if t.price_cap is not None and (total is None or total > t.price_cap):
-                    self.L("ORDER_OVER_CAP", T("订单 {0} 首期 {1} 对比上限 {2}，请检查", oid, total, t.price_cap))
+                    olock.release()
                 if t.auto_pay and oid:
                     st = await asyncio.to_thread(E.wait_paid, client, oid, 30, 3.0, None)
                     with SessionLocal() as db:
@@ -600,6 +638,11 @@ class TaskRunner:
                     self.L("PENDING_CONFIRM", T("结账后处理出错 {0}: {1}；为避免重复下单任务已永久停止，请到 OVH 控制台确认订单", type(e).__name__, e))
                     set_status(self.task_id, "pending_confirm", T("结账后出错，请人工确认"), enabled=False)
                     return
+                if RL.is_429(e):
+                    w = RL.hit(("acct", t.user_id, t.endpoint), RL.retry_after_of(e))
+                    self.L("INFO", T("OVH 限流 429，本账号所有任务暂停下单 {0:.0f}s", w), notify=False)
+                    await asyncio.sleep(1)
+                    continue
                 log.exception("task %s poll error", self.task_id)
                 self.L("ERROR", T("本轮处理出错 {0}: {1}（继续监控）", type(e).__name__, e))
                 await asyncio.sleep(1)
